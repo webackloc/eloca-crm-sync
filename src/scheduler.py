@@ -1,0 +1,447 @@
+"""
+scheduler.py — Orquestrador principal da integração ELOCA ↔ CRM Lovable
+
+Fluxo a cada ciclo:
+  1. Obtém api_token (reutiliza sessão salva ou faz login)
+  2. Busca ativos e OS via API HTTP direta (sem browser)
+  3. Salva CSV no Supabase Storage + upsert nas tabelas
+  4. Processa fila de criação de OS (CRM → ELOCA) via browser
+"""
+
+import asyncio
+import logging
+import os
+import sys
+from datetime import datetime
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+from eloca_auth import obter_token
+from eloca_api  import ElocaApiClient, NovaOS
+from eloca_bi   import fetch_carteira_contratos, fetch_equipamentos_ativos
+from supabase_sync import (
+    get_client,
+    upload_csv,
+    upsert_ativos,
+    upsert_ordens_servico,
+    buscar_os_pendentes_criacao,
+    marcar_os_criada,
+    marcar_os_erro,
+    marcar_os_processando,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger("scheduler")
+
+SYNC_CRON    = os.getenv("SYNC_CRON",    "0,30 8-18 * * 1-5")
+SYNC_TZ      = os.getenv("SYNC_TZ",      "America/Sao_Paulo")
+RUN_ON_START = os.getenv("RUN_ON_START", "true").lower() == "true"
+
+
+def _log_inicio(supabase, inicio: datetime) -> int | None:
+    """Insere linha de início na tabela sync_logs e retorna o id gerado."""
+    try:
+        res = supabase.table("sync_logs").insert({
+            "iniciado_em": inicio.isoformat() + "Z",
+            "status": "rodando",
+        }).execute()
+        return res.data[0]["id"] if res.data else None
+    except Exception as e:
+        logger.warning("Não foi possível registrar início no sync_logs: %s", e)
+        return None
+
+
+def _log_fim(supabase, log_id: int | None, inicio: datetime,
+             ativos_total: int, os_total: int, carteira_total: int,
+             erros: list[str]):
+    """Atualiza a linha de log com o resultado final do ciclo."""
+    if log_id is None:
+        return
+    try:
+        concluido = datetime.utcnow()
+        duracao   = round((concluido - inicio).total_seconds(), 1)
+        status    = "erro" if len(erros) == 3 else ("parcial" if erros else "sucesso")
+        supabase.table("sync_logs").update({
+            "concluido_em":   concluido.isoformat() + "Z",
+            "duracao_segundos": duracao,
+            "ativos_total":   ativos_total,
+            "os_total":       os_total,
+            "carteira_total": carteira_total,
+            "erros":          erros or None,
+            "status":         status,
+        }).eq("id", log_id).execute()
+    except Exception as e:
+        logger.warning("Não foi possível atualizar sync_logs (id=%s): %s", log_id, e)
+
+
+async def executar_sincronizacao():
+    inicio = datetime.utcnow()
+    logger.info("═" * 60)
+    logger.info("Ciclo iniciado — %s", inicio.isoformat())
+
+    erros = []
+    ativos_total = os_total = carteira_total = 0
+    supabase = get_client()
+
+    log_id = _log_inicio(supabase, inicio)
+
+    # ── 1. BI SQL Server — carteira e contratos (independente do token ELOCA) ──
+    try:
+        carteira = fetch_carteira_contratos()
+        carteira_total = len(carteira)
+        upsert_carteira_supabase(supabase, carteira)
+    except Exception as e:
+        msg = f"Erro ao buscar carteira de contratos (BI): {e}"
+        logger.error(msg)
+        erros.append(msg)
+
+    try:
+        equipamentos_ativos = fetch_equipamentos_ativos()
+        update_ativos_contratos_bi(supabase, equipamentos_ativos)
+    except Exception as e:
+        msg = f"Erro ao atualizar contratos em ativos (BI): {e}"
+        logger.error(msg)
+        erros.append(msg)
+
+    # ── 2. Obtém token ELOCA (para ativos e OS via REST/CGI) ─────────────────
+    try:
+        token_data = await obter_token()
+        api_token = token_data["api_token"]
+        user_id   = token_data["user_id"]
+        empresa   = token_data["empresa"]
+        logger.info("Token válido (user_id=%s, empresa=%s)", user_id, empresa)
+    except Exception as e:
+        msg = f"Falha ao obter token ELOCA: {e}"
+        logger.error("%s — pulando ativos/OS da API.", msg)
+        erros.append(msg)
+        _log_fim(supabase, log_id, inicio, ativos_total, os_total, carteira_total, erros)
+        return
+
+    # ── 3. Extração via API HTTP (ativos e OS) ────────────────────────────────
+    async with ElocaApiClient(api_token, user_id, empresa) as api:
+
+        # Ativos
+        try:
+            ativos = await api.listar_ativos()
+            ativos_total = len(ativos)
+            csv_ativos = ElocaApiClient.ativos_para_csv(ativos)
+            try:
+                upload_csv(supabase, "ativos.csv", csv_ativos)
+            except Exception as e_csv:
+                logger.warning("Upload CSV ativos ignorado: %s", e_csv)
+            upsert_ativos_supabase(supabase, ativos)
+        except Exception as e:
+            msg = f"Erro ao buscar ativos: {e}"
+            logger.error(msg)
+            erros.append(msg)
+
+        # OS
+        try:
+            os_list = await api.listar_os(dias_atras=60)
+            os_total = len(os_list)
+            csv_os  = ElocaApiClient.os_para_csv(os_list)
+            try:
+                upload_csv(supabase, "ordens_servico.csv", csv_os)
+            except Exception as e_csv:
+                logger.warning("Upload CSV OS ignorado: %s", e_csv)
+            upsert_os_supabase(supabase, os_list)
+        except Exception as e:
+            msg = f"Erro ao buscar OS: {e}"
+            logger.error(msg)
+            erros.append(msg)
+
+        # ── 4. Criação de OS (fila do CRM → ELOCA) ────────────────────────────
+        try:
+            pendentes = buscar_os_pendentes_criacao(supabase)
+            logger.info("%d OS pendente(s) de criação.", len(pendentes))
+
+            if pendentes:
+                await processar_fila_criacao_os(pendentes, supabase, api_token)
+
+        except Exception as e:
+            msg = f"Erro ao processar fila de OS: {e}"
+            logger.error(msg)
+            erros.append(msg)
+
+    # ── Resumo ────────────────────────────────────────────────────────────────
+    duracao = (datetime.utcnow() - inicio).total_seconds()
+    if erros:
+        logger.warning("Ciclo concluído com %d erro(s) em %.1fs.", len(erros), duracao)
+    else:
+        logger.info("Ciclo concluído com sucesso em %.1fs.", duracao)
+    logger.info("═" * 60)
+
+    _log_fim(supabase, log_id, inicio, ativos_total, os_total, carteira_total, erros)
+
+
+def upsert_ativos_supabase(supabase, ativos):
+    """Adapta o modelo Ativo do eloca_api para o formato do Supabase (todos os campos)."""
+    from datetime import datetime as dt
+
+    def s(v):
+        """Converte qualquer valor para string limpa, ou string vazia se None."""
+        return str(v).strip() if v is not None else ""
+
+    registros = []
+    for a in ativos:
+        item = a.extras  # dict completo retornado pela API
+        registros.append({
+            # ── Identificação ──────────────────────────────────────────────
+            "id":               s(item.get("recnum")) or s(item.get("equipamento")),
+            "codigo":           s(item.get("equipamento")),
+            "numero_serie":     s(item.get("serieFabricante")),
+            "descricao":        s(item.get("produto")),
+            "cod_produto":      s(item.get("codigo_produto")),
+            "produto":          s(item.get("produto")),
+            # ── Status e situação ──────────────────────────────────────────
+            "status":           s(item.get("status")),
+            "situacao_os":      s(item.get("situacaoOS")),
+            "tipo_os":          s(item.get("tipoOS")),
+            "os_aberta":        s(item.get("osAberta")),
+            "os_instalacao":    s(item.get("osInstalacao")),
+            "ult_os":           s(item.get("os")),
+            # ── Cliente e localização ──────────────────────────────────────
+            "cliente":          s(item.get("nomeFantasia") or item.get("local")),
+            "nome_fantasia":    s(item.get("nomeFantasia")),
+            "localizacao":      s(item.get("local")),
+            "local_contrato":   s(item.get("localContrato")),
+            "setor":            s(item.get("setor")),
+            # ── Endereço ──────────────────────────────────────────────────
+            "endereco":         s(item.get("endereco")),
+            "numero_endereco":  s(item.get("numero")),
+            "bairro":           s(item.get("bairro")),
+            "complemento":      s(item.get("complemento")),
+            "municipio":        s(item.get("municipio")),
+            "uf":               s(item.get("uf")),
+            "cep":              s(item.get("cep")),
+            # ── Contrato ──────────────────────────────────────────────────
+            "contrato":         s(item.get("contract")),
+            # ── Produto / classificação ────────────────────────────────────
+            "grupo":            s(item.get("descricao_grupo_produto")),
+            "grupo2":           s(item.get("descricao_grupo_produto2")),
+            "marca":            s(item.get("marca")),
+            "modelo":           s(item.get("modelo")),
+            # ── Aquisição ─────────────────────────────────────────────────
+            "data_instalacao":  s(item.get("aquisicao")),
+            "ano_fabricacao":   s(item.get("anoDeFabricacao")),
+            "termino_garantia": s(item.get("termoGarantia")),
+            "nota_fiscal":      s(item.get("notaFiscalCompraEquip")),
+            "valor_compra":     s(item.get("valcompra")),
+            "valor_mercado":    s(item.get("valorMercado")),
+            # ── Fornecedor / propriedade ───────────────────────────────────
+            "fornecedor":       s(item.get("fornecedor")),
+            "proprietario":     s(item.get("proprietario")),
+            "usado":            s(item.get("usado")),
+            # ── Logística ─────────────────────────────────────────────────
+            "envio":            s(item.get("envio")),
+            "ult_retorno":      s(item.get("data_ultimo_retorno")),
+            # ── Rede ──────────────────────────────────────────────────────
+            "ip":               s(item.get("IpEquip")),
+            # ── Informações extras ─────────────────────────────────────────
+            "inf1":             s(item.get("INF. 1")),
+            "inf2":             s(item.get("INF. 2")),
+            "inf3":             s(item.get("INF. 3")),
+            "inf4":             s(item.get("INF. 4")),
+            "inf5":             s(item.get("INF. 5")),
+            "inf6":             s(item.get("INF. 6")),
+            "inf7":             s(item.get("INF. 7")),
+            # ── Empresa ───────────────────────────────────────────────────
+            "empresa":          s(item.get("empresa")),
+            "filial":           s(item.get("filial")),
+            "sincronizado_em":  dt.utcnow().isoformat(),
+        })
+    if not registros:
+        return
+    from supabase_sync import _chunks
+    for lote in _chunks(registros, 500):
+        supabase.table("ativos").upsert(lote, on_conflict="id").execute()
+    logger.info("Upsert de %d ativos concluído.", len(registros))
+
+
+def upsert_os_supabase(supabase, os_list):
+    """Adapta o modelo OrdemServico do eloca_api para o formato do Supabase."""
+    from datetime import datetime as dt
+    registros = []
+    for o in os_list:
+        if not o.numero:
+            continue
+        registros.append({
+            "numero":          o.numero,
+            "tipo":            o.tipo,
+            "status":          o.status,
+            "cliente":         o.cliente,
+            "ativo_id":        o.equipamento,
+            "descricao":       o.descricao,
+            "tecnico":         o.tecnico,
+            "data_abertura":   o.data_abertura,
+            "data_fechamento": o.data_fechamento,
+            "sincronizado_em": dt.utcnow().isoformat(),
+        })
+    if not registros:
+        return
+    from supabase_sync import _chunks
+    for lote in _chunks(registros, 500):
+        supabase.table("ordens_servico").upsert(lote, on_conflict="numero").execute()
+    logger.info("Upsert de %d OS concluído.", len(registros))
+
+
+def upsert_carteira_supabase(supabase, carteira: list[dict]):
+    """
+    Upsert da carteira de contratos vindos do BI SQL Server.
+    Um registro por contrato (id = numero_contrato).
+    Campos: codigo, cliente, situacao, datavigini, datavigfim, cliente_nome.
+    """
+    from datetime import datetime as dt
+
+    def s(v):
+        return str(v).strip() if v is not None else ""
+
+    registros = []
+    for item in carteira:
+        codigo = s(item.get("codigo"))
+        if not codigo:
+            continue
+        registros.append({
+            "id":              codigo,
+            "numero_contrato": codigo,
+            "cliente_codigo":  s(item.get("cliente")),
+            "cliente_nome":    s(item.get("cliente_nome")),
+            "situacao":        s(item.get("situacao")),
+            "data_inicio":     s(item.get("datavigini")) or None,
+            "data_fim":        s(item.get("datavigfim")) or None,
+            "sincronizado_em": dt.utcnow().isoformat(),
+        })
+
+    if not registros:
+        logger.info("Carteira de contratos: nenhum registro para upsert.")
+        return
+
+    from supabase_sync import _chunks
+    for lote in _chunks(registros, 500):
+        supabase.table("carteira_contratos").upsert(lote, on_conflict="id").execute()
+    logger.info("Upsert de %d contratos na carteira_contratos concluído.", len(registros))
+
+
+def update_ativos_contratos_bi(supabase, equipamentos: list[dict]):
+    """
+    Atualiza campos contrato e nome_fantasia em ativos usando os dados do BI.
+    Agrupa por (contrato, cliente_nome) para minimizar chamadas ao Supabase
+    (uma chamada por contrato em vez de uma por equipamento).
+    """
+    from collections import defaultdict
+    from supabase_sync import _chunks
+
+    def s(v):
+        return str(v).strip() if v is not None else ""
+
+    # Agrupar equipamentos por (contrato, cliente_nome)
+    grupos: dict[tuple, list[str]] = defaultdict(list)
+    for item in equipamentos:
+        equip = s(item.get("equipamento"))
+        if not equip:
+            continue
+        key = (s(item.get("contrato")), s(item.get("cliente_nome")))
+        grupos[key].append(equip)
+
+    total = 0
+    for (contrato, cliente_nome), equip_list in grupos.items():
+        # Lotes de 200 para não exceder limite de URL do PostgREST
+        for lote in _chunks(equip_list, 200):
+            try:
+                supabase.table("ativos").update({
+                    "contrato":     contrato,
+                    "nome_fantasia": cliente_nome,
+                }).in_("codigo", lote).execute()
+                total += len(lote)
+            except Exception as e:
+                logger.warning(
+                    "Erro ao atualizar ativos contrato=%s (%d equip): %s",
+                    contrato, len(lote), e
+                )
+
+    logger.info("Ativos atualizados com contrato/cliente via BI: %d", total)
+
+
+async def processar_fila_criacao_os(pendentes: list[dict], supabase, api_token: str):
+    """
+    Cria OS no ELOCA via CGI para cada item da fila.
+    Usa httpx direto (sem browser) — o CGI aceita POST autenticado.
+    """
+    import httpx
+    from eloca_api import CGI_BASE
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http:
+        for item in pendentes:
+            fila_id = item["id"]
+            marcar_os_processando(supabase, fila_id)
+
+            try:
+                # Monta o POST para criar a OS via CGI
+                # ACAO=1 = incluir nova OS (verifique o valor real inspecionando
+                # a requisição ao clicar em "Salvar" no formulário do ELOCA)
+                form_data = {
+                    "PRG":       "scp102a1",
+                    "ACAO":      "1",
+                    "ISAJAX":    "S",
+                    "EMPRESA":   "",           # preenchido pelo server via sessão
+                    "CLIENTE":   item.get("cliente", ""),
+                    "EQUIPAMENTO": item.get("ativo_id", ""),
+                    "TIPO":      item.get("tipo_servico", ""),
+                    "DESCRICAO": item.get("descricao", ""),
+                    "TECNICO":   item.get("tecnico", ""),
+                    "DTPREV":    item.get("data_prevista", ""),
+                    "api_token": api_token,
+                }
+
+                r = await http.post(CGI_BASE, data=form_data)
+                r.raise_for_status()
+
+                # Tenta extrair número da OS da resposta
+                import re
+                numero_os = "N/A"
+                m = re.search(r'OS[:\s#]*(\d+)', r.text, re.IGNORECASE)
+                if m:
+                    numero_os = m.group(1)
+
+                marcar_os_criada(supabase, fila_id, numero_os)
+                logger.info("OS criada: %s (fila_id=%s)", numero_os, fila_id)
+
+            except Exception as e:
+                marcar_os_erro(supabase, fila_id, str(e))
+                logger.error("Erro ao criar OS (fila_id=%s): %s", fila_id, e)
+
+
+async def main():
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(SYNC_TZ)
+
+    logger.info("Integração ELOCA ↔ CRM Lovable iniciando …")
+    logger.info("Cron: %s  Timezone: %s", SYNC_CRON, SYNC_TZ)
+
+    scheduler = AsyncIOScheduler(timezone=tz)
+    scheduler.add_job(
+        executar_sincronizacao,
+        CronTrigger.from_crontab(SYNC_CRON, timezone=tz),
+        id="sync_eloca",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.start()
+
+    if RUN_ON_START:
+        await executar_sincronizacao()
+
+    try:
+        while True:
+            await asyncio.sleep(60)
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

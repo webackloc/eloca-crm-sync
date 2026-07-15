@@ -1,0 +1,41 @@
+# fly.toml app configuration file generated for eloca-crm-sync on 2026-06-09T13:52:20-03:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'eloca-crm-sync'
+primary_region = 'gru'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  API_BASE = 'https://api.otimogestor.com.br'
+  CGI_BASE = 'https://weback.app.otimogestor.com.br/cgi-bin/exec.cgi'
+  ELOCA_EMPRESA = 'WEBACK'
+  LOGIN_URL = 'https://api.otimogestor.com.br/'
+  RUN_ON_START = 'true'
+  SESSION_FILE = '/data/eloca_session.json'
+  SISTEMA_BASE = 'https://sistema.otimogestor.com.br'
+  SUPABASE_BUCKET = 'eloca-sync'
+  SYNC_CRON = '*/30 * * * *'
+  TOKEN_FILE = '/data/eloca_token.json'
+  BI_HOST = 'og-bi.crwm94zs8mf9.sa-east-1.rds.amazonaws.com'
+  BI_PORT = '1433'
+  BI_DATABASE = 'biweback'
+  BI_USER = 'weback'
+
+[processes]
+  worker = 'python src/scheduler.py'
+
+[[mounts]]
+  source = 'eloca_data'
+  destination = '/data'
+
+[[restart]]
+  policy = 'on-failure'
+  retries = 3
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'

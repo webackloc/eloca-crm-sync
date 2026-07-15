@@ -1,0 +1,74 @@
+name: ELOCA ↔ CRM Sync
+
+on:
+  schedule:
+    # A cada 30 minutos, seg-sex, 11h-21h UTC (= 8h-18h horário de Brasília)
+    - cron: '0,30 11-21 * * 1-5'
+  workflow_dispatch:
+    # Permite rodar manualmente pela aba Actions no GitHub
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependências do sistema (FreeTDS para pymssql)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends freetds-dev freetds-bin
+
+      - name: Instalar dependências Python
+        run: pip install --no-cache-dir -r requirements.txt
+
+      # Cache do token ELOCA entre execuções (evita gastar 2captcha em todo ciclo)
+      - name: Restaurar cache do token ELOCA
+        uses: actions/cache@v4
+        with:
+          path: /tmp/eloca_token.json
+          key: eloca-token-${{ github.run_id }}
+          restore-keys: |
+            eloca-token-
+
+      - name: Executar sincronização
+        env:
+          # Supabase
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_BUCKET:      eloca-sync
+
+          # BI SQL Server
+          BI_HOST:     ${{ secrets.BI_HOST }}
+          BI_PORT:     ${{ secrets.BI_PORT }}
+          BI_DATABASE: ${{ secrets.BI_DATABASE }}
+          BI_USER:     ${{ secrets.BI_USER }}
+          BI_PASSWORD: ${{ secrets.BI_PASSWORD }}
+
+          # ELOCA API (ativos + OS)
+          ELOCA_EMPRESA:    ${{ secrets.ELOCA_EMPRESA }}
+          ELOCA_USER:       ${{ secrets.ELOCA_USER }}
+          ELOCA_PASSWORD:   ${{ secrets.ELOCA_PASSWORD }}
+          TWOCAPTCHA_API_KEY: ${{ secrets.TWOCAPTCHA_API_KEY }}
+          PROXY_URL:        ${{ secrets.PROXY_URL }}
+
+          # URLs fixas
+          API_BASE:     https://api.otimogestor.com.br
+          CGI_BASE:     https://weback.app.otimogestor.com.br/cgi-bin/exec.cgi
+          SISTEMA_BASE: https://sistema.otimogestor.com.br
+          LOGIN_URL:    https://api.otimogestor.com.br/
+
+          # Arquivos de sessão (temporários no runner)
+          TOKEN_FILE:   /tmp/eloca_token.json
+          SESSION_FILE: /tmp/eloca_session.json
+
+          PYTHONPATH: ${{ github.workspace }}/src
+
+        run: python src/run_once.py
