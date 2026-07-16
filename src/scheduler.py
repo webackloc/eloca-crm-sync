@@ -341,9 +341,11 @@ def upsert_carteira_supabase(supabase, carteira: list[dict]):
 
 
 def sync_contracts_native(supabase, carteira: list[dict]):
-    """Atualiza start_date/end_date na tabela nativa contracts do CRM."""
+    """Atualiza start_date/end_date na tabela nativa contracts do CRM (lotes de 20)."""
     def s(v):
         return str(v).strip() if v is not None else ""
+
+    from supabase_sync import _chunks
 
     registros = []
     for item in carteira:
@@ -357,12 +359,14 @@ def sync_contracts_native(supabase, carteira: list[dict]):
         })
     if not registros:
         return
-    try:
-        res = supabase.rpc("sync_contracts_native", {"p_data": registros}).execute()
-        atualizados = res.data or 0
-        logger.info("sync_contracts_native: %d contrato(s) atualizados no CRM nativo.", atualizados)
-    except Exception as e:
-        logger.warning("Erro em sync_contracts_native: %s", e)
+    total = 0
+    for lote in _chunks(registros, 20):
+        try:
+            res = supabase.rpc("sync_contracts_native", {"p_data": lote}).execute()
+            total += res.data or 0
+        except Exception as e:
+            logger.warning("Erro em sync_contracts_native (lote %d): %s", len(lote), e)
+    logger.info("sync_contracts_native: %d contrato(s) atualizados no CRM nativo.", total)
 
 
 def sync_assets_contract_native(supabase, equipamentos: list[dict]):
