@@ -116,6 +116,7 @@ async def executar_sincronizacao():
         carteira = fetch_carteira_contratos()
         carteira_total = len(carteira)
         upsert_carteira_supabase(supabase, carteira)
+        sync_contracts_native(supabase, carteira)
     except Exception as e:
         msg = f"Erro ao buscar carteira de contratos (BI): {e}"
         logger.error(msg)
@@ -124,6 +125,7 @@ async def executar_sincronizacao():
     try:
         equipamentos_ativos = fetch_equipamentos_ativos()
         update_ativos_contratos_bi(supabase, equipamentos_ativos)
+        sync_assets_contract_native(supabase, equipamentos_ativos)
     except Exception as e:
         msg = f"Erro ao atualizar contratos em ativos (BI): {e}"
         logger.error(msg)
@@ -336,6 +338,59 @@ def upsert_carteira_supabase(supabase, carteira: list[dict]):
             logger.info("Cleanup: %d contrato(s) removido(s) da carteira (não mais ativos no BI).", removidos)
     except Exception as e:
         logger.warning("Erro no cleanup da carteira_contratos: %s", e)
+
+
+def sync_contracts_native(supabase, carteira: list[dict]):
+    """Atualiza start_date/end_date na tabela nativa contracts do CRM."""
+    def s(v):
+        return str(v).strip() if v is not None else ""
+
+    registros = []
+    for item in carteira:
+        codigo = s(item.get("codigo"))
+        if not codigo:
+            continue
+        registros.append({
+            "numero_contrato": codigo,
+            "data_inicio":     s(item.get("datavigini")) or None,
+            "data_fim":        s(item.get("datavigfim")) or None,
+        })
+    if not registros:
+        return
+    try:
+        res = supabase.rpc("sync_contracts_native", {"p_data": registros}).execute()
+        atualizados = res.data or 0
+        logger.info("sync_contracts_native: %d contrato(s) atualizados no CRM nativo.", atualizados)
+    except Exception as e:
+        logger.warning("Erro em sync_contracts_native: %s", e)
+
+
+def sync_assets_contract_native(supabase, equipamentos: list[dict]):
+    """Atualiza contract_id na tabela nativa assets do CRM."""
+    def s(v):
+        return str(v).strip() if v is not None else ""
+
+    from supabase_sync import _chunks
+
+    registros = []
+    for item in equipamentos:
+        equip = s(item.get("equipamento"))
+        contrato = s(item.get("contrato"))
+        if not equip or not contrato:
+            continue
+        registros.append({"equipamento": equip, "contrato": contrato})
+
+    if not registros:
+        return
+
+    total = 0
+    for lote in _chunks(registros, 500):
+        try:
+            res = supabase.rpc("sync_assets_contract_native", {"p_data": lote}).execute()
+            total += res.data or 0
+        except Exception as e:
+            logger.warning("Erro em sync_assets_contract_native (lote %d): %s", len(lote), e)
+    logger.info("sync_assets_contract_native: %d ativo(s) vinculados ao contrato no CRM nativo.", total)
 
 
 def update_ativos_contratos_bi(supabase, equipamentos: list[dict]):

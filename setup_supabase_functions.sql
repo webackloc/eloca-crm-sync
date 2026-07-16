@@ -264,6 +264,63 @@ $$;
 
 
 -- ---------------------------------------------------------------------------
+-- 8. sync_contracts_native — atualiza datas de vigência nas tabelas nativas do CRM
+--    Recebe array de {numero_contrato, data_inicio, data_fim}
+--    Faz match por contracts.contract_number
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.sync_contracts_native(p_data JSONB)
+RETURNS INT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE v_count INT;
+BEGIN
+  UPDATE contracts c
+  SET
+    start_date = TO_DATE(NULLIF(item->>'data_inicio', ''), 'YYYY-MM-DD'),
+    end_date   = TO_DATE(NULLIF(item->>'data_fim',    ''), 'YYYY-MM-DD'),
+    updated_at = NOW()
+  FROM jsonb_array_elements(p_data) AS item
+  WHERE c.contract_number = item->>'numero_contrato';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN v_count;
+END;
+$$;
+
+
+-- ---------------------------------------------------------------------------
+-- 9. sync_assets_contract_native — vincula assets ao contrato correto (contract_id UUID)
+--    Recebe array de {equipamento, contrato}
+--    Faz match por assets.name = equipamento; busca contract_id via contract_number
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.sync_assets_contract_native(p_data JSONB)
+RETURNS INT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE v_count INT;
+BEGIN
+  UPDATE assets a
+  SET
+    contract_id = (
+      SELECT c.id FROM contracts c
+      WHERE c.contract_number = item->>'contrato'
+      LIMIT 1
+    ),
+    updated_at = NOW()
+  FROM jsonb_array_elements(p_data) AS item
+  WHERE a.name = item->>'equipamento'
+    AND (item->>'contrato') IS NOT NULL
+    AND (item->>'contrato') != '';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN v_count;
+END;
+$$;
+
+
+-- ---------------------------------------------------------------------------
 -- Permissões: permite que a anon key chame as funções
 -- ---------------------------------------------------------------------------
 GRANT EXECUTE ON FUNCTION public.log_sync_inicio()            TO anon;
@@ -273,3 +330,5 @@ GRANT EXECUTE ON FUNCTION public.sync_ativos_contratos(JSONB)   TO anon;
 GRANT EXECUTE ON FUNCTION public.sync_ativos(JSONB)             TO anon;
 GRANT EXECUTE ON FUNCTION public.sync_ordens_servico(JSONB)     TO anon;
 GRANT EXECUTE ON FUNCTION public.cleanup_carteira_contratos(JSONB) TO anon;
+GRANT EXECUTE ON FUNCTION public.sync_contracts_native(JSONB)       TO anon;
+GRANT EXECUTE ON FUNCTION public.sync_assets_contract_native(JSONB) TO anon;
