@@ -239,9 +239,14 @@ def upsert_ativos_supabase(supabase, ativos):
     if not registros:
         return
     from supabase_sync import _chunks
-    for lote in _chunks(registros, 500):
-        supabase.rpc("sync_ativos", {"p_data": lote}).execute()
-    logger.info("Upsert de %d ativos concluído via RPC.", len(registros))
+    total = 0
+    for lote in _chunks(registros, 250):
+        try:
+            supabase.rpc("sync_ativos", {"p_data": lote}).execute()
+            total += len(lote)
+        except Exception as e:
+            logger.warning("Erro ao sincronizar lote de ativos (%d): %s", len(lote), e)
+    logger.info("Upsert de %d/%d ativos concluído via RPC.", total, len(registros))
 
 
 def upsert_os_supabase(supabase, os_list):
@@ -324,7 +329,7 @@ def update_ativos_contratos_bi(supabase, equipamentos: list[dict]):
         return
 
     total = 0
-    for lote in _chunks(registros, 2000):
+    for lote in _chunks(registros, 500):
         try:
             supabase.rpc("sync_ativos_contratos", {"p_data": lote}).execute()
             total += len(lote)
