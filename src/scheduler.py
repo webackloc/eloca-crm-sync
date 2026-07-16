@@ -44,13 +44,10 @@ RUN_ON_START = os.getenv("RUN_ON_START", "true").lower() == "true"
 
 
 def _log_inicio(supabase, inicio: datetime) -> int | None:
-    """Insere linha de início na tabela sync_logs e retorna o id gerado."""
+    """Insere linha de início na tabela sync_logs via RPC e retorna o id gerado."""
     try:
-        res = supabase.table("sync_logs").insert({
-            "iniciado_em": inicio.isoformat() + "Z",
-            "status": "rodando",
-        }).execute()
-        return res.data[0]["id"] if res.data else None
+        res = supabase.rpc("log_sync_inicio", {}).execute()
+        return res.data if res.data else None
     except Exception as e:
         logger.warning("Não foi possível registrar início no sync_logs: %s", e)
         return None
@@ -59,22 +56,22 @@ def _log_inicio(supabase, inicio: datetime) -> int | None:
 def _log_fim(supabase, log_id: int | None, inicio: datetime,
              ativos_total: int, os_total: int, carteira_total: int,
              erros: list[str]):
-    """Atualiza a linha de log com o resultado final do ciclo."""
+    """Atualiza a linha de log com o resultado final do ciclo via RPC."""
     if log_id is None:
         return
     try:
         concluido = datetime.utcnow()
         duracao   = round((concluido - inicio).total_seconds(), 1)
         status    = "erro" if len(erros) == 3 else ("parcial" if erros else "sucesso")
-        supabase.table("sync_logs").update({
-            "concluido_em":   concluido.isoformat() + "Z",
-            "duracao_segundos": duracao,
-            "ativos_total":   ativos_total,
-            "os_total":       os_total,
-            "carteira_total": carteira_total,
-            "erros":          erros or None,
-            "status":         status,
-        }).eq("id", log_id).execute()
+        supabase.rpc("log_sync_fim", {
+            "p_log_id":         log_id,
+            "p_ativos_total":   ativos_total,
+            "p_os_total":       os_total,
+            "p_carteira_total": carteira_total,
+            "p_erros":          erros or None,
+            "p_duracao":        duracao,
+            "p_status":         status,
+        }).execute()
     except Exception as e:
         logger.warning("Não foi possível atualizar sync_logs (id=%s): %s", log_id, e)
 
@@ -180,38 +177,31 @@ async def executar_sincronizacao():
 
 
 def upsert_ativos_supabase(supabase, ativos):
-    """Adapta o modelo Ativo do eloca_api para o formato do Supabase (todos os campos)."""
-    from datetime import datetime as dt
-
+    """Upsert de ativos via RPC sync_ativos (SECURITY DEFINER)."""
     def s(v):
-        """Converte qualquer valor para string limpa, ou string vazia se None."""
         return str(v).strip() if v is not None else ""
 
     registros = []
     for a in ativos:
-        item = a.extras  # dict completo retornado pela API
+        item = a.extras
         registros.append({
-            # ── Identificação ──────────────────────────────────────────────
             "id":               s(item.get("recnum")) or s(item.get("equipamento")),
             "codigo":           s(item.get("equipamento")),
             "numero_serie":     s(item.get("serieFabricante")),
             "descricao":        s(item.get("produto")),
             "cod_produto":      s(item.get("codigo_produto")),
             "produto":          s(item.get("produto")),
-            # ── Status e situação ──────────────────────────────────────────
             "status":           s(item.get("status")),
             "situacao_os":      s(item.get("situacaoOS")),
             "tipo_os":          s(item.get("tipoOS")),
             "os_aberta":        s(item.get("osAberta")),
             "os_instalacao":    s(item.get("osInstalacao")),
             "ult_os":           s(item.get("os")),
-            # ── Cliente e localização ──────────────────────────────────────
             "cliente":          s(item.get("nomeFantasia") or item.get("local")),
             "nome_fantasia":    s(item.get("nomeFantasia")),
             "localizacao":      s(item.get("local")),
             "local_contrato":   s(item.get("localContrato")),
             "setor":            s(item.get("setor")),
-            # ── Endereço ──────────────────────────────────────────────────
             "endereco":         s(item.get("endereco")),
             "numero_endereco":  s(item.get("numero")),
             "bairro":           s(item.get("bairro")),
@@ -219,30 +209,23 @@ def upsert_ativos_supabase(supabase, ativos):
             "municipio":        s(item.get("municipio")),
             "uf":               s(item.get("uf")),
             "cep":              s(item.get("cep")),
-            # ── Contrato ──────────────────────────────────────────────────
             "contrato":         s(item.get("contract")),
-            # ── Produto / classificação ────────────────────────────────────
             "grupo":            s(item.get("descricao_grupo_produto")),
             "grupo2":           s(item.get("descricao_grupo_produto2")),
             "marca":            s(item.get("marca")),
             "modelo":           s(item.get("modelo")),
-            # ── Aquisição ─────────────────────────────────────────────────
             "data_instalacao":  s(item.get("aquisicao")),
             "ano_fabricacao":   s(item.get("anoDeFabricacao")),
             "termino_garantia": s(item.get("termoGarantia")),
             "nota_fiscal":      s(item.get("notaFiscalCompraEquip")),
             "valor_compra":     s(item.get("valcompra")),
             "valor_mercado":    s(item.get("valorMercado")),
-            # ── Fornecedor / propriedade ───────────────────────────────────
             "fornecedor":       s(item.get("fornecedor")),
             "proprietario":     s(item.get("proprietario")),
             "usado":            s(item.get("usado")),
-            # ── Logística ─────────────────────────────────────────────────
             "envio":            s(item.get("envio")),
             "ult_retorno":      s(item.get("data_ultimo_retorno")),
-            # ── Rede ──────────────────────────────────────────────────────
             "ip":               s(item.get("IpEquip")),
-            # ── Informações extras ─────────────────────────────────────────
             "inf1":             s(item.get("INF. 1")),
             "inf2":             s(item.get("INF. 2")),
             "inf3":             s(item.get("INF. 3")),
@@ -250,22 +233,19 @@ def upsert_ativos_supabase(supabase, ativos):
             "inf5":             s(item.get("INF. 5")),
             "inf6":             s(item.get("INF. 6")),
             "inf7":             s(item.get("INF. 7")),
-            # ── Empresa ───────────────────────────────────────────────────
             "empresa":          s(item.get("empresa")),
             "filial":           s(item.get("filial")),
-            "sincronizado_em":  dt.utcnow().isoformat(),
         })
     if not registros:
         return
     from supabase_sync import _chunks
     for lote in _chunks(registros, 500):
-        supabase.table("ativos").upsert(lote, on_conflict="id").execute()
-    logger.info("Upsert de %d ativos concluído.", len(registros))
+        supabase.rpc("sync_ativos", {"p_data": lote}).execute()
+    logger.info("Upsert de %d ativos concluído via RPC.", len(registros))
 
 
 def upsert_os_supabase(supabase, os_list):
-    """Adapta o modelo OrdemServico do eloca_api para o formato do Supabase."""
-    from datetime import datetime as dt
+    """Upsert de OS via RPC sync_ordens_servico (SECURITY DEFINER)."""
     registros = []
     for o in os_list:
         if not o.numero:
@@ -280,24 +260,17 @@ def upsert_os_supabase(supabase, os_list):
             "tecnico":         o.tecnico,
             "data_abertura":   o.data_abertura,
             "data_fechamento": o.data_fechamento,
-            "sincronizado_em": dt.utcnow().isoformat(),
         })
     if not registros:
         return
     from supabase_sync import _chunks
     for lote in _chunks(registros, 500):
-        supabase.table("ordens_servico").upsert(lote, on_conflict="numero").execute()
-    logger.info("Upsert de %d OS concluído.", len(registros))
+        supabase.rpc("sync_ordens_servico", {"p_data": lote}).execute()
+    logger.info("Upsert de %d OS concluído via RPC.", len(registros))
 
 
 def upsert_carteira_supabase(supabase, carteira: list[dict]):
-    """
-    Upsert da carteira de contratos vindos do BI SQL Server.
-    Um registro por contrato (id = numero_contrato).
-    Campos: codigo, cliente, situacao, datavigini, datavigfim, cliente_nome.
-    """
-    from datetime import datetime as dt
-
+    """Upsert da carteira de contratos via RPC sync_carteira_contratos (SECURITY DEFINER)."""
     def s(v):
         return str(v).strip() if v is not None else ""
 
@@ -314,7 +287,6 @@ def upsert_carteira_supabase(supabase, carteira: list[dict]):
             "situacao":        s(item.get("situacao")),
             "data_inicio":     s(item.get("datavigini")) or None,
             "data_fim":        s(item.get("datavigfim")) or None,
-            "sincronizado_em": dt.utcnow().isoformat(),
         })
 
     if not registros:
@@ -323,48 +295,43 @@ def upsert_carteira_supabase(supabase, carteira: list[dict]):
 
     from supabase_sync import _chunks
     for lote in _chunks(registros, 500):
-        supabase.table("carteira_contratos").upsert(lote, on_conflict="id").execute()
-    logger.info("Upsert de %d contratos na carteira_contratos concluído.", len(registros))
+        supabase.rpc("sync_carteira_contratos", {"p_data": lote}).execute()
+    logger.info("Upsert de %d contratos na carteira_contratos concluído via RPC.", len(registros))
 
 
 def update_ativos_contratos_bi(supabase, equipamentos: list[dict]):
     """
-    Atualiza campos contrato e nome_fantasia em ativos usando os dados do BI.
-    Agrupa por (contrato, cliente_nome) para minimizar chamadas ao Supabase
-    (uma chamada por contrato em vez de uma por equipamento).
+    Atualiza contrato e nome_fantasia em ativos via RPC sync_ativos_contratos.
+    Passa todos os registros de uma vez — o PostgreSQL faz o UPDATE em lote.
     """
-    from collections import defaultdict
     from supabase_sync import _chunks
 
     def s(v):
         return str(v).strip() if v is not None else ""
 
-    # Agrupar equipamentos por (contrato, cliente_nome)
-    grupos: dict[tuple, list[str]] = defaultdict(list)
+    registros = []
     for item in equipamentos:
         equip = s(item.get("equipamento"))
         if not equip:
             continue
-        key = (s(item.get("contrato")), s(item.get("cliente_nome")))
-        grupos[key].append(equip)
+        registros.append({
+            "equipamento":  equip,
+            "contrato":     s(item.get("contrato")),
+            "cliente_nome": s(item.get("cliente_nome")),
+        })
+
+    if not registros:
+        return
 
     total = 0
-    for (contrato, cliente_nome), equip_list in grupos.items():
-        # Lotes de 200 para não exceder limite de URL do PostgREST
-        for lote in _chunks(equip_list, 200):
-            try:
-                supabase.table("ativos").update({
-                    "contrato":     contrato,
-                    "nome_fantasia": cliente_nome,
-                }).in_("codigo", lote).execute()
-                total += len(lote)
-            except Exception as e:
-                logger.warning(
-                    "Erro ao atualizar ativos contrato=%s (%d equip): %s",
-                    contrato, len(lote), e
-                )
+    for lote in _chunks(registros, 2000):
+        try:
+            supabase.rpc("sync_ativos_contratos", {"p_data": lote}).execute()
+            total += len(lote)
+        except Exception as e:
+            logger.warning("Erro ao atualizar ativos via RPC (lote %d): %s", len(lote), e)
 
-    logger.info("Ativos atualizados com contrato/cliente via BI: %d", total)
+    logger.info("Ativos atualizados com contrato/cliente via BI RPC: %d", total)
 
 
 async def processar_fila_criacao_os(pendentes: list[dict], supabase, api_token: str):

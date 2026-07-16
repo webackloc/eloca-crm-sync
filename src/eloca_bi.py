@@ -53,7 +53,7 @@ def fetch_carteira_contratos() -> list[dict]:
             CONVERT(VARCHAR(10), c.datavigini, 120) AS datavigini,
             CONVERT(VARCHAR(10), c.datavigfim, 120) AS datavigfim,
             (
-                SELECT TOP 1 d.razaosocial
+                SELECT TOP 1 d.cliente
                 FROM docrec d
                 WHERE d.codigocliente = c.cliente
                 ORDER BY d.recnum DESC
@@ -111,7 +111,7 @@ def fetch_equipamentos_ativos() -> list[dict]:
             lm.contrato,
             c.cliente,
             (
-                SELECT TOP 1 d.razaosocial
+                SELECT TOP 1 d.cliente
                 FROM docrec d
                 WHERE d.codigocliente = c.cliente
                 ORDER BY d.recnum DESC
