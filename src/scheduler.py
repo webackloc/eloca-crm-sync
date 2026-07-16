@@ -89,9 +89,12 @@ async def _buscar_os_com_retry(api) -> list:
             erro_str = str(e).lower()
             if tentativa == 0 and ("sessão" in erro_str or "cookies" in erro_str or "segurança" in erro_str):
                 logger.warning("Sessão CGI expirada — renovando login e tentando novamente ...")
-                await obter_token(forcar_novo_login=True)
+                novo = await obter_token(forcar_novo_login=True)
+                api.api_token        = novo["api_token"]
+                api.user_id          = novo["user_id"]
                 api._session_cookies = carregar_cookies()
-                logger.info("Cookies renovados (%d cookies). Retentando OS ...", len(api._session_cookies))
+                logger.info("Credenciais renovadas (user_id=%s, %d cookies). Retentando OS ...",
+                            api.user_id, len(api._session_cookies))
             else:
                 raise
     return []
