@@ -303,6 +303,16 @@ def upsert_carteira_supabase(supabase, carteira: list[dict]):
         supabase.rpc("sync_carteira_contratos", {"p_data": lote}).execute()
     logger.info("Upsert de %d contratos na carteira_contratos concluído via RPC.", len(registros))
 
+    # Remove contratos que não estão mais ativos no BI
+    try:
+        ids_ativos = [r["id"] for r in registros]
+        res = supabase.rpc("cleanup_carteira_contratos", {"p_ids": ids_ativos}).execute()
+        removidos = res.data or 0
+        if removidos:
+            logger.info("Cleanup: %d contrato(s) removido(s) da carteira (não mais ativos no BI).", removidos)
+    except Exception as e:
+        logger.warning("Erro no cleanup da carteira_contratos: %s", e)
+
 
 def update_ativos_contratos_bi(supabase, equipamentos: list[dict]):
     """

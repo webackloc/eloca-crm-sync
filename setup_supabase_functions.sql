@@ -242,6 +242,28 @@ $$;
 
 
 -- ---------------------------------------------------------------------------
+-- 7. cleanup_carteira_contratos — remove contratos que não estão mais ativos no BI
+--    Recebe array de IDs ativos; deleta tudo que não estiver na lista
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.cleanup_carteira_contratos(p_ids JSONB)
+RETURNS INT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE v_count INT;
+BEGIN
+  DELETE FROM carteira_contratos
+  WHERE id NOT IN (
+    SELECT value::text FROM jsonb_array_elements_text(p_ids)
+  );
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN v_count;
+END;
+$$;
+
+
+-- ---------------------------------------------------------------------------
 -- Permissões: permite que a anon key chame as funções
 -- ---------------------------------------------------------------------------
 GRANT EXECUTE ON FUNCTION public.log_sync_inicio()            TO anon;
@@ -250,3 +272,4 @@ GRANT EXECUTE ON FUNCTION public.sync_carteira_contratos(JSONB) TO anon;
 GRANT EXECUTE ON FUNCTION public.sync_ativos_contratos(JSONB)   TO anon;
 GRANT EXECUTE ON FUNCTION public.sync_ativos(JSONB)             TO anon;
 GRANT EXECUTE ON FUNCTION public.sync_ordens_servico(JSONB)     TO anon;
+GRANT EXECUTE ON FUNCTION public.cleanup_carteira_contratos(JSONB) TO anon;
