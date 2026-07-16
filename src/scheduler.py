@@ -17,7 +17,7 @@ from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from eloca_auth import obter_token
+from eloca_auth import obter_token, carregar_cookies
 from eloca_api  import ElocaApiClient, NovaOS
 from eloca_bi   import fetch_carteira_contratos, fetch_equipamentos_ativos
 from supabase_sync import (
@@ -74,6 +74,27 @@ def _log_fim(supabase, log_id: int | None, inicio: datetime,
         }).execute()
     except Exception as e:
         logger.warning("Não foi possível atualizar sync_logs (id=%s): %s", log_id, e)
+
+
+async def _buscar_os_com_retry(api) -> list:
+    """
+    Busca OS via CGI com retry automático quando a sessão expirar.
+    - 1ª tentativa: usa cookies em cache.
+    - Se falhar por sessão inválida: força novo login, atualiza cookies, tenta de novo.
+    """
+    for tentativa in range(2):
+        try:
+            return await api.listar_os(dias_atras=60)
+        except RuntimeError as e:
+            erro_str = str(e).lower()
+            if tentativa == 0 and ("sessão" in erro_str or "cookies" in erro_str or "segurança" in erro_str):
+                logger.warning("Sessão CGI expirada — renovando login e tentando novamente ...")
+                await obter_token(forcar_novo_login=True)
+                api._session_cookies = carregar_cookies()
+                logger.info("Cookies renovados (%d cookies). Retentando OS ...", len(api._session_cookies))
+            else:
+                raise
+    return []
 
 
 async def executar_sincronizacao():
@@ -137,9 +158,9 @@ async def executar_sincronizacao():
             logger.error(msg)
             erros.append(msg)
 
-        # OS
+        # OS (com retry automático se sessão CGI expirar)
         try:
-            os_list = await api.listar_os(dias_atras=60)
+            os_list = await _buscar_os_com_retry(api)
             os_total = len(os_list)
             csv_os  = ElocaApiClient.os_para_csv(os_list)
             try:

@@ -29,14 +29,16 @@ jobs:
       - name: Instalar dependências Python
         run: pip install --no-cache-dir -r requirements.txt
 
-      # Cache do token ELOCA entre execuções (evita gastar 2captcha em todo ciclo)
+      # Cache do token e cookies de sessão ELOCA entre execuções
       - name: Restaurar cache do token ELOCA
         uses: actions/cache@v4
         with:
-          path: /tmp/eloca_token.json
-          key: eloca-token-${{ github.run_id }}
+          path: |
+            /tmp/eloca_token.json
+            /tmp/eloca_session.json
+          key: eloca-session-${{ github.run_id }}
           restore-keys: |
-            eloca-token-
+            eloca-session-
 
       - name: Executar sincronização
         env:
