@@ -6,3 +6,4 @@ __pycache__/
 /tmp/
 *.png
 *.log
+bi_export_*.xlsx
