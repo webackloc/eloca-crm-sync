@@ -25,7 +25,7 @@ jobs:
       - name: Instalar dependências Python
         run: pip install --no-cache-dir pymssql openpyxl supabase
 
-      - name: Gerar e fazer upload do Excel
+      - name: Gerar Excel
         env:
           BI_HOST:              ${{ secrets.BI_HOST }}
           BI_PORT:              ${{ secrets.BI_PORT }}
@@ -35,3 +35,10 @@ jobs:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python src/exportar_carteira_excel.py
+
+      - name: Publicar Excel como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: carteira-crm
+          path: /tmp/excel_output/carteira_crm_validacao.xlsx
+          retention-days: 7

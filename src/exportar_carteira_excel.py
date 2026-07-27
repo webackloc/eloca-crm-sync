@@ -30,6 +30,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 OUTPUT_FILE = "/tmp/carteira_crm_validacao.xlsx"
+OUTPUT_DIR  = "/tmp/excel_output"
 
 # ── Estilos ───────────────────────────────────────────────────────────────────
 HDR_FILL  = PatternFill("solid", fgColor="1F3864")      # azul escuro
@@ -360,28 +361,9 @@ print(f"  {len(rows4)} notas fiscais 2026")
 conn.close()
 
 # ── Salva o arquivo ───────────────────────────────────────────────────────────
-wb.save(OUTPUT_FILE)
-print(f"\nExcel salvo em: {OUTPUT_FILE}")
-
-# ── Upload para Supabase Storage ──────────────────────────────────────────────
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        from supabase import create_client
-        sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-        filename = "carteira_crm_validacao.xlsx"
-        with open(OUTPUT_FILE, "rb") as f:
-            data = f.read()
-        sb.storage.from_("eloca-sync").upload(
-            filename, data,
-            file_options={
-                "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "upsert": "true",
-            }
-        )
-        public_url = f"{SUPABASE_URL}/storage/v1/object/public/eloca-sync/{filename}"
-        print(f"\n✅ Download em: {public_url}")
-    except Exception as e:
-        print(f"Erro no upload: {e}")
-        sys.exit(1)
-else:
-    print("SUPABASE_URL/SUPABASE_SERVICE_KEY não definidos — arquivo salvo apenas localmente.")
+import os as _os
+_os.makedirs(OUTPUT_DIR, exist_ok=True)
+dest = f"{OUTPUT_DIR}/carteira_crm_validacao.xlsx"
+wb.save(dest)
+print(f"\n✅ Excel salvo em: {dest}")
+print("   Faça download na aba Actions → run atual → Artifacts → carteira-crm")
