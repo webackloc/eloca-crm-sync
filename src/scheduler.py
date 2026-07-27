@@ -19,7 +19,10 @@ from apscheduler.triggers.cron import CronTrigger
 
 from eloca_auth import obter_token, carregar_cookies
 from eloca_api  import ElocaApiClient, NovaOS
-from eloca_bi   import fetch_carteira_contratos, fetch_equipamentos_ativos
+from eloca_bi   import (
+    fetch_carteira_contratos, fetch_equipamentos_ativos,
+    fetch_bi_movimentacoes, fetch_bi_ctprod, fetch_bi_faturamento,
+)
 from supabase_sync import (
     get_client,
     upload_csv,
@@ -128,6 +131,31 @@ async def executar_sincronizacao():
         sync_assets_contract_native(supabase, equipamentos_ativos)
     except Exception as e:
         msg = f"Erro ao atualizar contratos em ativos (BI): {e}"
+        logger.error(msg)
+        erros.append(msg)
+
+    # ── 1b. BI SQL Server — movimentações, produtos e faturamento ─────────────
+    try:
+        movs = fetch_bi_movimentacoes()
+        sync_bi_movimentacoes(supabase, movs)
+    except Exception as e:
+        msg = f"Erro ao sincronizar ctmequip (movimentações): {e}"
+        logger.error(msg)
+        erros.append(msg)
+
+    try:
+        ctprod = fetch_bi_ctprod()
+        sync_bi_ctprod(supabase, ctprod)
+    except Exception as e:
+        msg = f"Erro ao sincronizar ctprod: {e}"
+        logger.error(msg)
+        erros.append(msg)
+
+    try:
+        faturamento = fetch_bi_faturamento()
+        sync_bi_faturamento(supabase, faturamento)
+    except Exception as e:
+        msg = f"Erro ao sincronizar docrec (faturamento): {e}"
         logger.error(msg)
         erros.append(msg)
 
@@ -430,6 +458,51 @@ def update_ativos_contratos_bi(supabase, equipamentos: list[dict]):
             logger.warning("Erro ao atualizar ativos via RPC (lote %d): %s", len(lote), e)
 
     logger.info("Ativos atualizados com contrato/cliente via BI RPC: %d", total)
+
+
+def sync_bi_movimentacoes(supabase, movs: list[dict]):
+    """Upsert de ctmequip na tabela bi_movimentacoes via RPC."""
+    if not movs:
+        return
+    from supabase_sync import _chunks
+    total = 0
+    for lote in _chunks(movs, 500):
+        try:
+            res = supabase.rpc("sync_bi_movimentacoes", {"p_data": lote}).execute()
+            total += res.data or 0
+        except Exception as e:
+            logger.warning("Erro em sync_bi_movimentacoes (lote %d): %s", len(lote), e)
+    logger.info("sync_bi_movimentacoes: %d/%d registros inseridos/atualizados.", total, len(movs))
+
+
+def sync_bi_ctprod(supabase, ctprod: list[dict]):
+    """Upsert de ctprod na tabela bi_ctprod via RPC."""
+    if not ctprod:
+        return
+    from supabase_sync import _chunks
+    total = 0
+    for lote in _chunks(ctprod, 500):
+        try:
+            res = supabase.rpc("sync_bi_ctprod", {"p_data": lote}).execute()
+            total += res.data or 0
+        except Exception as e:
+            logger.warning("Erro em sync_bi_ctprod (lote %d): %s", len(lote), e)
+    logger.info("sync_bi_ctprod: %d/%d registros inseridos/atualizados.", total, len(ctprod))
+
+
+def sync_bi_faturamento(supabase, faturamento: list[dict]):
+    """Upsert de docrec na tabela bi_faturamento via RPC."""
+    if not faturamento:
+        return
+    from supabase_sync import _chunks
+    total = 0
+    for lote in _chunks(faturamento, 500):
+        try:
+            res = supabase.rpc("sync_bi_faturamento", {"p_data": lote}).execute()
+            total += res.data or 0
+        except Exception as e:
+            logger.warning("Erro em sync_bi_faturamento (lote %d): %s", len(lote), e)
+    logger.info("sync_bi_faturamento: %d/%d registros inseridos/atualizados.", total, len(faturamento))
 
 
 async def processar_fila_criacao_os(pendentes: list[dict], supabase, api_token: str):

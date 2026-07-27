@@ -3,7 +3,7 @@ exportar_carteira_excel.py — Gera Excel completo de tudo que será enviado ao 
 
 Sheets:
   1. Carteira_Contratos   — 133 contratos ativos com cliente, vigência, totais
-  2. Equip_por_Contrato   — equipamentos ativos com serial (via Supabase ativos)
+  2. Equip_por_Contrato   — equipamentos ativos com serial, produto e valor unitário (via Supabase assets + ctprod)
   3. Produtos_Contrato    — itens ctprod com produto, descrição e valores
   4. Faturamento_2026     — notas fiscais emitidas em 2026
 
@@ -94,28 +94,34 @@ conn = pymssql.connect(
 )
 cur = conn.cursor(as_dict=True)
 
-# ── Busca seriais do Supabase ─────────────────────────────────────────────────
-seriais = {}
+# ── Busca assets do Supabase (serial + product_code por equipamento) ──────────
+equip_assets = {}   # equip_code -> {"serial": ..., "product_code": ...}
+seriais = {}        # mantido por compatibilidade
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         from supabase import create_client
         sb = create_client(SUPABASE_URL, SUPABASE_KEY)
         page, page_size = 0, 1000
         while True:
-            res = (sb.table("ativos")
-                     .select("codigo,numero_serie")
+            res = (sb.table("assets")
+                     .select("name,serial_number,product_code")
                      .range(page * page_size, (page + 1) * page_size - 1)
                      .execute())
             if not res.data:
                 break
             for a in res.data:
-                seriais[str(a["codigo"])] = str(a.get("numero_serie") or "")
+                equip_code = str(a.get("name") or "")
+                serial     = str(a.get("serial_number") or "")
+                prod_code  = str(a.get("product_code") or "")
+                equip_assets[equip_code] = {"serial": serial, "product_code": prod_code}
+                if serial:
+                    seriais[equip_code] = serial
             if len(res.data) < page_size:
                 break
             page += 1
-        print(f"  Seriais carregados do Supabase: {len(seriais)}")
+        print(f"  Assets carregados do Supabase (tabela assets): {len(equip_assets)}")
     except Exception as e:
-        print(f"  Aviso: não foi possível carregar seriais do Supabase: {e}")
+        print(f"  Aviso: não foi possível carregar assets do Supabase: {e}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 wb = openpyxl.Workbook()
@@ -202,6 +208,28 @@ autofit(ws1)
 freeze_and_filter(ws1)
 print(f"  {len(rows1)} contratos")
 
+# ── Lookup ctprod: (contrato, produto) -> valorunitario e descricao ───────────
+print("Carregando lookup de produtos (ctprod)...")
+cur.execute("""
+    SELECT
+        CONVERT(VARCHAR(20), cp.contrato) AS contrato,
+        CONVERT(VARCHAR(20), cp.produto)  AS produto,
+        ISNULL(CONVERT(VARCHAR(500), p.descricao), cp.produto) AS descricao,
+        CONVERT(FLOAT, ISNULL(cp.valorunitario, 0)) AS valorunitario
+    FROM ctprod cp
+    LEFT JOIN produtos p ON p.codigo = cp.produto
+    JOIN contract c ON c.codigo = cp.contrato
+    WHERE c.situacao = '3'
+""")
+ctprod_lookup = {}
+for _r in cur.fetchall():
+    _key = (str(_r['contrato']), str(_r['produto']))
+    ctprod_lookup[_key] = {
+        'descricao': str(_r['descricao'] or ""),
+        'valorunitario': float(_r['valorunitario'] or 0),
+    }
+print(f"  {len(ctprod_lookup)} combos contrato+produto carregados")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SHEET 2 — Equip_por_Contrato
 # ══════════════════════════════════════════════════════════════════════════════
@@ -246,20 +274,28 @@ cur.execute("""
 rows2 = cur.fetchall()
 
 headers2 = ["Contrato", "Cliente", "Cód Equipamento", "Número Série",
+            "Cód Produto", "Descrição Produto", "Valor Unitário (R$)",
             "Status", "Data Entrega", "Plano/Setor", "Nº OS",
             "Início Vigência", "Fim Vigência"]
 apply_header(ws2, headers2)
 
 for r in rows2:
-    equip = str(r["equipamento"] or "")
-    serial = seriais.get(equip, "")
+    equip       = str(r["equipamento"] or "")
+    contrato    = str(r["contrato"] or "")
+    asset_info  = equip_assets.get(equip, {})
+    serial      = asset_info.get("serial", "")
+    prod_code   = asset_info.get("product_code", "")
+    ctprod_info = ctprod_lookup.get((contrato, prod_code), {})
+    descricao   = ctprod_info.get("descricao", "")
+    valor_unit  = ctprod_info.get("valorunitario", None) if prod_code else None
     ws2.append([
-        r["contrato"], r["cliente_nome"] or "", equip, serial,
+        contrato, r["cliente_nome"] or "", equip, serial,
+        prod_code, descricao, valor_unit,
         "ATIVO (entregue)", r["data_movimento"], r["setor"], r["numos"],
         r["contrato_inicio"], r["contrato_fim"],
     ])
 
-style_rows(ws2, len(rows2), date_cols=[6, 9, 10])
+style_rows(ws2, len(rows2), currency_cols=[7], date_cols=[9, 12, 13])
 autofit(ws2)
 freeze_and_filter(ws2)
 print(f"  {len(rows2)} equipamentos ativos")
