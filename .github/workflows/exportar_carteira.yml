@@ -23,7 +23,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends freetds-dev freetds-bin
 
       - name: Instalar dependências Python
-        run: pip install --no-cache-dir pymssql openpyxl
+        run: pip install --no-cache-dir pymssql openpyxl supabase
 
       - name: Gerar e fazer upload do Excel
         env:

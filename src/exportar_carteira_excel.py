@@ -97,17 +97,21 @@ cur = conn.cursor(as_dict=True)
 seriais = {}
 if SUPABASE_URL and SUPABASE_KEY:
     try:
-        import urllib.request, json
-        req = urllib.request.Request(
-            f"{SUPABASE_URL}/rest/v1/ativos?select=codigo,numero_serie&limit=20000",
-            headers={
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-            }
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            ativos = json.loads(resp.read())
-        seriais = {str(a["codigo"]): str(a.get("numero_serie") or "") for a in ativos}
+        from supabase import create_client
+        sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+        page, page_size = 0, 1000
+        while True:
+            res = (sb.table("ativos")
+                     .select("codigo,numero_serie")
+                     .range(page * page_size, (page + 1) * page_size - 1)
+                     .execute())
+            if not res.data:
+                break
+            for a in res.data:
+                seriais[str(a["codigo"])] = str(a.get("numero_serie") or "")
+            if len(res.data) < page_size:
+                break
+            page += 1
         print(f"  Seriais carregados do Supabase: {len(seriais)}")
     except Exception as e:
         print(f"  Aviso: não foi possível carregar seriais do Supabase: {e}")
@@ -362,24 +366,20 @@ print(f"\nExcel salvo em: {OUTPUT_FILE}")
 # ── Upload para Supabase Storage ──────────────────────────────────────────────
 if SUPABASE_URL and SUPABASE_KEY:
     try:
-        import urllib.request
+        from supabase import create_client
+        sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+        filename = "carteira_crm_validacao.xlsx"
         with open(OUTPUT_FILE, "rb") as f:
             data = f.read()
-        filename = "carteira_crm_validacao.xlsx"
-        req = urllib.request.Request(
-            f"{SUPABASE_URL}/storage/v1/object/eloca-sync/{filename}",
-            data=data,
-            headers={
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-                "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "x-upsert": "true",
-            },
-            method="POST",
+        sb.storage.from_("eloca-sync").upload(
+            filename, data,
+            file_options={
+                "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "upsert": "true",
+            }
         )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            print(f"Upload concluído: {resp.status}")
-            print(f"\n✅ Download em: {SUPABASE_URL}/storage/v1/object/public/eloca-sync/{filename}")
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/eloca-sync/{filename}"
+        print(f"\n✅ Download em: {public_url}")
     except Exception as e:
         print(f"Erro no upload: {e}")
         sys.exit(1)
