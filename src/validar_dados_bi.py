@@ -8,7 +8,6 @@ Uso:
   BI_PASSWORD="..." python3 src/validar_dados_bi.py
 """
 import os
-from decimal import Decimal
 import pymssql
 
 conn = pymssql.connect(
@@ -31,19 +30,19 @@ print(SEP)
 
 cur.execute("""
     SELECT
-        recnum,
-        equipamento,
-        contrato,
-        envret,
+        CONVERT(VARCHAR(20), recnum)    AS recnum,
+        CONVERT(VARCHAR(20), equipamento) AS equipamento,
+        CONVERT(VARCHAR(20), contrato)  AS contrato,
+        CONVERT(VARCHAR(1),  envret)    AS envret,
         CONVERT(VARCHAR(10), data, 120) AS data,
-        ISNULL(setor, '') AS setor,
-        numos,
-        ISNULL(local, '') AS local,
-        seq,
-        quantidade,
-        valor,
-        horimetro,
-        ISNULL(observacao, '') AS observacao
+        ISNULL(CONVERT(VARCHAR(500), setor), '') AS setor,
+        CONVERT(VARCHAR(20), numos)     AS numos,
+        ISNULL(CONVERT(VARCHAR(100), local), '') AS local,
+        CONVERT(VARCHAR(20), seq)       AS seq,
+        CONVERT(VARCHAR(30), quantidade) AS quantidade,
+        CONVERT(VARCHAR(30), valor)     AS valor,
+        CONVERT(VARCHAR(30), horimetro) AS horimetro,
+        ISNULL(CONVERT(VARCHAR(1000), observacao), '') AS observacao
     FROM ctmequip
     ORDER BY recnum
 """)
@@ -54,7 +53,7 @@ print(f"\nTotal de registros: {len(rows)}")
 # Amostra — 5 mais recentes
 print("\n--- Amostra (5 mais recentes por recnum) ---")
 for r in rows[-5:]:
-    print({k: (str(v) if isinstance(v, Decimal) else v) for k, v in r.items()})
+    print(dict(r))
 
 # Qualidade dos campos chave
 sem_recnum    = sum(1 for r in rows if not r['recnum'])
@@ -87,14 +86,14 @@ print(SEP)
 
 cur.execute("""
     SELECT
-        cp.recnum,
-        cp.contrato,
-        cp.produto,
-        ISNULL(p.descricao, cp.produto) AS produto_descricao,
-        ISNULL(cp.setor, '') AS setor,
-        cp.valor,
-        cp.valorunitario,
-        cp.seqequip
+        CONVERT(VARCHAR(20), cp.recnum)       AS recnum,
+        CONVERT(VARCHAR(20), cp.contrato)     AS contrato,
+        CONVERT(VARCHAR(20), cp.produto)      AS produto,
+        ISNULL(CONVERT(VARCHAR(500), p.descricao), cp.produto) AS produto_descricao,
+        ISNULL(CONVERT(VARCHAR(500), cp.setor), '') AS setor,
+        CONVERT(VARCHAR(30), cp.valor)        AS valor,
+        CONVERT(VARCHAR(30), cp.valorunitario) AS valorunitario,
+        CONVERT(VARCHAR(20), cp.seqequip)     AS seqequip
     FROM ctprod cp
     LEFT JOIN produtos p ON p.codigo = cp.produto
     ORDER BY cp.recnum
@@ -105,7 +104,7 @@ print(f"\nTotal de registros: {len(rows_ctprod)}")
 
 print("\n--- Amostra (10 primeiros) ---")
 for r in rows_ctprod[:10]:
-    print({k: (str(v) if isinstance(v, Decimal) else v) for k, v in r.items()})
+    print(dict(r))
 
 # Qualidade
 sem_recnum_cp = sum(1 for r in rows_ctprod if not r['recnum'])
@@ -154,18 +153,18 @@ print(SEP)
 
 cur.execute("""
     SELECT
-        d.numfatura,
-        d.numsequencia,
-        ISNULL(d.contrato, '') AS contrato,
-        d.codigocliente,
-        ISNULL(d.cliente, '') AS cliente,
-        d.valoremissao,
+        CONVERT(VARCHAR(20), d.numfatura)    AS numfatura,
+        CONVERT(VARCHAR(10), d.numsequencia) AS numsequencia,
+        ISNULL(CONVERT(VARCHAR(20), d.contrato), '') AS contrato,
+        CONVERT(VARCHAR(20), d.codigocliente) AS codigocliente,
+        ISNULL(CONVERT(VARCHAR(200), d.cliente), '') AS cliente,
+        CONVERT(VARCHAR(30), d.valoremissao) AS valoremissao,
         CONVERT(VARCHAR(10), d.dataemissao, 120) AS dataemissao,
         CONVERT(VARCHAR(10), d.datavencto,  120) AS datavencto,
-        ISNULL(d.liquidado, ' ') AS liquidado,
-        ISNULL(d.tipodocumento, '') AS tipodocumento,
-        ISNULL(c.representante, '') AS representante,
-        ISNULL(c.representante_nome, '') AS representante_nome
+        ISNULL(CONVERT(VARCHAR(1), d.liquidado), ' ') AS liquidado,
+        ISNULL(CONVERT(VARCHAR(100), d.tipodocumento), '') AS tipodocumento,
+        ISNULL(CONVERT(VARCHAR(20), c.representante), '') AS representante,
+        ISNULL(CONVERT(VARCHAR(200), c.representante_nome), '') AS representante_nome
     FROM docrec d
     LEFT JOIN contract c ON c.codigo = d.contrato
     ORDER BY d.numfatura
@@ -176,7 +175,7 @@ print(f"\nTotal de registros: {len(rows_fat)}")
 
 print("\n--- Amostra (5 mais recentes) ---")
 for r in rows_fat[-5:]:
-    print({k: (str(v) if isinstance(v, Decimal) else v) for k, v in r.items()})
+    print(dict(r))
 
 # Qualidade
 sem_numfatura = sum(1 for r in rows_fat if not r['numfatura'])
