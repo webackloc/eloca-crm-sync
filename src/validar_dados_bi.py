@@ -110,8 +110,8 @@ for r in rows_ctprod[:10]:
 sem_recnum_cp = sum(1 for r in rows_ctprod if not r['recnum'])
 sem_contrato_cp = sum(1 for r in rows_ctprod if not r['contrato'])
 sem_produto_cp = sum(1 for r in rows_ctprod if not r['produto'])
-sem_valor_cp = sum(1 for r in rows_ctprod if not r['valor'] or r['valor'] == Decimal('0'))
-sem_valunit_cp = sum(1 for r in rows_ctprod if not r['valorunitario'] or r['valorunitario'] == Decimal('0'))
+sem_valor_cp = sum(1 for r in rows_ctprod if not r['valor'] or float(r['valor'] or 0) == 0)
+sem_valunit_cp = sum(1 for r in rows_ctprod if not r['valorunitario'] or float(r['valorunitario'] or 0) == 0)
 sem_desc_cp = sum(1 for r in rows_ctprod if r['produto_descricao'] == r['produto'])  # fallback
 
 print(f"\n--- Qualidade dos campos ---")
