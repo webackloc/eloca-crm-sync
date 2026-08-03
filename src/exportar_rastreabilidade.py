@@ -88,7 +88,6 @@ cur.execute("""
         ISNULL(CONVERT(VARCHAR(20),  e.codigoproduto), '')   AS cod_produto,
         ISNULL(CONVERT(VARCHAR(500), e.produto), '')         AS descricao_produto,
         ISNULL(CONVERT(VARCHAR(200), e.seriefabricante), '') AS serial_fabricante,
-        ISNULL(CONVERT(VARCHAR(1),   e.situacao), '')        AS situacao_equip,
         CONVERT(VARCHAR(19), e.created_at,   120)            AS equip_updated_bi,
 
         -- ── ctprod ────────────────────────────────────────────────────────
@@ -117,7 +116,6 @@ print(f"  {len(rows):,} registros retornados")
 
 # ── Situações legíveis ────────────────────────────────────────────────────────
 SITUACAO_CONTRATO = {'3': 'APROVADO', '4': 'REPROVADO', '5': 'ENCERRADO'}
-SITUACAO_EQUIP    = {'A': 'ATIVO', 'I': 'INATIVO', 'V': 'VENDIDO'}
 
 # ── Gerar Excel ───────────────────────────────────────────────────────────────
 print("Gerando Excel...")
@@ -137,7 +135,7 @@ headers = [
     "Ativo (Equipamento)", "E/R", "Data Movimento", "Setor",
     "Atualiz. BI (movimento)",
     # equip
-    "Cód Produto", "Descrição Produto", "Serial Fabricante", "Situação Equip",
+    "Cód Produto", "Descrição Produto", "Serial Fabricante",
     "Atualiz. BI (equip)",
     # ctprod
     "Valor Unitário (R$)", "Atualiz. BI (ctprod)",
@@ -155,7 +153,6 @@ ws.row_dimensions[1].height = 32
 for row_idx, r in enumerate(rows, 2):
     envret   = str(r['envret'] or '').strip()
     sit_cont = SITUACAO_CONTRATO.get(str(r['situacao_contrato'] or '').strip(), r['situacao_contrato'] or '')
-    sit_eq   = SITUACAO_EQUIP.get(str(r['situacao_equip'] or '').strip(), r['situacao_equip'] or '')
     vunit    = float(r['valor_unitario'] or 0)
 
     valores = [
@@ -163,7 +160,7 @@ for row_idx, r in enumerate(rows, 2):
         r['datavigini'], r['datavigfim'], r['dataalteracao'], r['contract_updated_bi'],
         r['ativo'], 'ENVIADO' if envret == 'E' else 'RETORNO', r['data_movimento'], r['setor'],
         r['movimento_updated_bi'],
-        r['cod_produto'], r['descricao_produto'], r['serial_fabricante'], sit_eq,
+        r['cod_produto'], r['descricao_produto'], r['serial_fabricante'],
         r['equip_updated_bi'],
         vunit, r['ctprod_updated_bi'],
     ]
@@ -179,7 +176,7 @@ for row_idx, r in enumerate(rows, 2):
         cell.fill   = row_fill
         cell.border = BRD
         cell.alignment = Alignment(vertical="center")
-        if col_idx == 19:   # Valor Unitário
+        if col_idx == 18:   # Valor Unitário
             cell.number_format = CURRENCY_FMT
             cell.alignment = Alignment(horizontal="right", vertical="center")
 
@@ -221,7 +218,6 @@ print(f"  Posição atual: {len(ativos_no_contrato)} ativos em contrato, {len(em
 for row_idx, r in enumerate(sorted(posicao.values(), key=lambda x: (str(x['contrato']), str(x['ativo']))), 2):
     envret   = str(r['envret'] or '').strip()
     sit_cont = SITUACAO_CONTRATO.get(str(r['situacao_contrato'] or '').strip(), r['situacao_contrato'] or '')
-    sit_eq   = SITUACAO_EQUIP.get(str(r['situacao_equip'] or '').strip(), r['situacao_equip'] or '')
     vunit    = float(r['valor_unitario'] or 0)
 
     ws2.append([
@@ -229,7 +225,7 @@ for row_idx, r in enumerate(sorted(posicao.values(), key=lambda x: (str(x['contr
         r['datavigini'], r['datavigfim'], r['dataalteracao'], r['contract_updated_bi'],
         r['ativo'], 'ENVIADO' if envret == 'E' else 'RETORNO', r['data_movimento'], r['setor'],
         r['movimento_updated_bi'],
-        r['cod_produto'], r['descricao_produto'], r['serial_fabricante'], sit_eq,
+        r['cod_produto'], r['descricao_produto'], r['serial_fabricante'],
         r['equip_updated_bi'],
         vunit, r['ctprod_updated_bi'],
     ])
