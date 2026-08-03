@@ -47,6 +47,25 @@ SYNC_TZ      = os.getenv("SYNC_TZ",      "America/Sao_Paulo")
 RUN_ON_START = os.getenv("RUN_ON_START", "true").lower() == "true"
 
 
+def _get_sync_state(supabase, tabela: str) -> int:
+    """Retorna o último recnum sincronizado para a tabela via RPC."""
+    try:
+        res = supabase.rpc("get_sync_state", {"p_tabela": tabela}).execute()
+        return int(res.data or 0)
+    except Exception as e:
+        logger.warning("Não foi possível ler sync_state para %s: %s", tabela, e)
+        return 0
+
+
+def _update_sync_state(supabase, tabela: str, recnum: int) -> None:
+    """Grava o último recnum sincronizado para a tabela via RPC."""
+    try:
+        supabase.rpc("update_sync_state", {"p_tabela": tabela, "p_recnum": recnum}).execute()
+        logger.info("sync_state atualizado: %s → recnum %d", tabela, recnum)
+    except Exception as e:
+        logger.warning("Não foi possível atualizar sync_state para %s: %s", tabela, e)
+
+
 def _log_inicio(supabase, inicio: datetime) -> int | None:
     """Insere linha de início na tabela sync_logs via RPC e retorna o id gerado."""
     try:
@@ -135,25 +154,37 @@ async def executar_sincronizacao():
         logger.error(msg)
         erros.append(msg)
 
-    # ── 1b. BI SQL Server — movimentações, produtos e faturamento ─────────────
+    # ── 1b. BI SQL Server — movimentações, produtos e faturamento (incremental) ─
     try:
-        movs = fetch_bi_movimentacoes()
-        sync_bi_movimentacoes(supabase, movs)
+        ultimo_movs = _get_sync_state(supabase, "bi_movimentacoes")
+        movs = fetch_bi_movimentacoes(ultimo_recnum=ultimo_movs)
+        if movs:
+            sync_bi_movimentacoes(supabase, movs)
+            novo_recnum = max(int(r["recnum"]) for r in movs)
+            _update_sync_state(supabase, "bi_movimentacoes", novo_recnum)
+        else:
+            logger.info("bi_movimentacoes: nenhum registro novo desde recnum %d.", ultimo_movs)
     except Exception as e:
         msg = f"Erro ao sincronizar ctmequip (movimentações): {e}"
         logger.error(msg)
         erros.append(msg)
 
     try:
-        ctprod = fetch_bi_ctprod()
-        sync_bi_ctprod(supabase, ctprod)
+        ultimo_ctprod = _get_sync_state(supabase, "bi_ctprod")
+        ctprod = fetch_bi_ctprod(ultimo_recnum=ultimo_ctprod)
+        if ctprod:
+            sync_bi_ctprod(supabase, ctprod)
+            novo_recnum = max(int(r["recnum"]) for r in ctprod)
+            _update_sync_state(supabase, "bi_ctprod", novo_recnum)
+        else:
+            logger.info("bi_ctprod: nenhum registro novo desde recnum %d.", ultimo_ctprod)
     except Exception as e:
         msg = f"Erro ao sincronizar ctprod: {e}"
         logger.error(msg)
         erros.append(msg)
 
     try:
-        faturamento = fetch_bi_faturamento()
+        faturamento = fetch_bi_faturamento(janela_dias=90)
         sync_bi_faturamento(supabase, faturamento)
     except Exception as e:
         msg = f"Erro ao sincronizar docrec (faturamento): {e}"

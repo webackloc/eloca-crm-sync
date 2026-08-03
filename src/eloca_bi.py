@@ -82,33 +82,38 @@ def fetch_carteira_contratos() -> list[dict]:
 # Equipamentos ativos (para atualizar ativos.contrato / ativos.nome_fantasia)
 # ---------------------------------------------------------------------------
 
-def fetch_bi_movimentacoes() -> list[dict]:
+def fetch_bi_movimentacoes(ultimo_recnum: int = 0) -> list[dict]:
     """
-    Retorna todos os registros de ctmequip (movimentações de equipamentos).
-    Colunas: recnum, equipamento, contrato, envret, data, setor, numos,
-             local, seq, quantidade, valor, horimetro, observacao
+    Retorna movimentações de equipamentos (ctmequip) — sync incremental.
+
+    Se ultimo_recnum > 0: busca apenas registros novos (recnum > ultimo_recnum).
+    Se ultimo_recnum == 0: full sync (primeira execução).
+
+    Colunas: recnum, equipamento, contrato, envret, data, setor, numos, seq
     """
     sql = """
         SELECT
-            CONVERT(VARCHAR(20), recnum)     AS recnum,
+            CONVERT(VARCHAR(20), recnum)      AS recnum,
             CONVERT(VARCHAR(20), equipamento) AS equipamento,
-            CONVERT(VARCHAR(20), contrato)   AS contrato,
-            CONVERT(VARCHAR(1),  envret)     AS envret,
-            CONVERT(VARCHAR(10), data, 120)  AS data,
+            CONVERT(VARCHAR(20), contrato)    AS contrato,
+            CONVERT(VARCHAR(1),  envret)      AS envret,
+            CONVERT(VARCHAR(10), data, 120)   AS data,
             ISNULL(CONVERT(VARCHAR(500), setor), '') AS setor,
-            CONVERT(VARCHAR(20), numos)      AS numos,
-            CONVERT(VARCHAR(10), seq)        AS seq
+            CONVERT(VARCHAR(20), numos)       AS numos,
+            CONVERT(VARCHAR(10), seq)         AS seq
         FROM ctmequip
+        WHERE recnum > %(ultimo_recnum)s
         ORDER BY recnum
     """
-    logger.info("[BI] Buscando ctmequip (movimentações) ...")
+    modo = f"incremental (recnum > {ultimo_recnum})" if ultimo_recnum else "full sync"
+    logger.info("[BI] Buscando ctmequip (%s) ...", modo)
     conn = _get_conn()
     try:
         cur = conn.cursor(as_dict=True)
-        cur.execute(sql)
+        cur.execute(sql, {"ultimo_recnum": ultimo_recnum})
         rows = cur.fetchall()
         result = [dict(r) for r in rows]
-        logger.info("[BI] ctmequip: %d registros.", len(result))
+        logger.info("[BI] ctmequip: %d registros novos.", len(result))
         return result
     except Exception as e:
         logger.error("[BI] Erro ao buscar ctmequip: %s", e)
@@ -117,11 +122,14 @@ def fetch_bi_movimentacoes() -> list[dict]:
         conn.close()
 
 
-def fetch_bi_ctprod() -> list[dict]:
+def fetch_bi_ctprod(ultimo_recnum: int = 0) -> list[dict]:
     """
-    Retorna todos os registros de ctprod com descrição do produto (join).
-    Colunas: recnum, contrato, produto, produto_descricao, setor,
-             valor, valorunitario, seqequip
+    Retorna registros de ctprod — sync incremental por recnum.
+
+    Se ultimo_recnum > 0: busca apenas registros novos.
+    Se ultimo_recnum == 0: full sync (primeira execução).
+
+    Colunas: recnum, contrato, produto, produto_descricao, setor, valor, valorunitario
     """
     sql = """
         SELECT
@@ -134,16 +142,18 @@ def fetch_bi_ctprod() -> list[dict]:
             CONVERT(VARCHAR(30), cp.valorunitario) AS valorunitario
         FROM ctprod cp
         LEFT JOIN produtos p ON p.codigo = cp.produto
+        WHERE cp.recnum > %(ultimo_recnum)s
         ORDER BY cp.recnum
     """
-    logger.info("[BI] Buscando ctprod ...")
+    modo = f"incremental (recnum > {ultimo_recnum})" if ultimo_recnum else "full sync"
+    logger.info("[BI] Buscando ctprod (%s) ...", modo)
     conn = _get_conn()
     try:
         cur = conn.cursor(as_dict=True)
-        cur.execute(sql)
+        cur.execute(sql, {"ultimo_recnum": ultimo_recnum})
         rows = cur.fetchall()
         result = [dict(r) for r in rows]
-        logger.info("[BI] ctprod: %d registros.", len(result))
+        logger.info("[BI] ctprod: %d registros novos.", len(result))
         return result
     except Exception as e:
         logger.error("[BI] Erro ao buscar ctprod: %s", e)
@@ -152,21 +162,26 @@ def fetch_bi_ctprod() -> list[dict]:
         conn.close()
 
 
-def fetch_bi_faturamento() -> list[dict]:
+def fetch_bi_faturamento(janela_dias: int = 90) -> list[dict]:
     """
-    Retorna todos os registros de docrec com representante (join).
+    Retorna faturas (docrec) — janela deslizante de N dias.
+
+    Estratégia: sempre rebusca os últimos janela_dias para capturar atualizações
+    no campo 'liquidado' (faturas pagas após emissão).
+    Padrão: 90 dias (~3 meses de histórico vivo).
+
     Colunas: numfatura, numsequencia, contrato, codigocliente, cliente,
              valoremissao, dataemissao, datavencto, liquidado, tipodocumento,
              representante, representante_nome
     """
     sql = """
         SELECT
-            CONVERT(VARCHAR(30), d.numfatura)    AS numfatura,
-            CONVERT(VARCHAR(10), d.numsequencia) AS numsequencia,
+            CONVERT(VARCHAR(30), d.numfatura)     AS numfatura,
+            CONVERT(VARCHAR(10), d.numsequencia)  AS numsequencia,
             NULLIF(LTRIM(RTRIM(ISNULL(CONVERT(VARCHAR(20), d.contrato), ''))), '') AS contrato,
             CONVERT(VARCHAR(20), d.codigocliente) AS codigocliente,
             ISNULL(CONVERT(VARCHAR(200), d.cliente), '') AS cliente,
-            CONVERT(VARCHAR(30), d.valoremissao) AS valoremissao,
+            CONVERT(VARCHAR(30), d.valoremissao)  AS valoremissao,
             CONVERT(VARCHAR(10), d.dataemissao, 120) AS dataemissao,
             CONVERT(VARCHAR(10), d.datavencto,  120) AS datavencto,
             ISNULL(CONVERT(VARCHAR(1), d.liquidado), ' ') AS liquidado,
@@ -175,13 +190,14 @@ def fetch_bi_faturamento() -> list[dict]:
             ISNULL(CONVERT(VARCHAR(200), c.representante_nome), '') AS representante_nome
         FROM docrec d
         LEFT JOIN contract c ON c.codigo = d.contrato
+        WHERE d.dataemissao >= DATEADD(day, -%(janela_dias)s, GETDATE())
         ORDER BY d.numfatura
     """
-    logger.info("[BI] Buscando docrec (faturamento) ...")
+    logger.info("[BI] Buscando docrec (últimos %d dias) ...", janela_dias)
     conn = _get_conn()
     try:
         cur = conn.cursor(as_dict=True)
-        cur.execute(sql)
+        cur.execute(sql, {"janela_dias": janela_dias})
         rows = cur.fetchall()
         result = [dict(r) for r in rows]
         logger.info("[BI] docrec: %d registros.", len(result))
