@@ -88,6 +88,7 @@ cur.execute("""
         ISNULL(CONVERT(VARCHAR(20),  e.codigoproduto), '')   AS cod_produto,
         ISNULL(CONVERT(VARCHAR(500), e.produto), '')         AS descricao_produto,
         ISNULL(CONVERT(VARCHAR(200), e.seriefabricante), '') AS serial_fabricante,
+        ISNULL(CONVERT(VARCHAR(50),  e.situacao), '')        AS situacao_equip,
         CONVERT(VARCHAR(19), e.created_at,   120)            AS equip_updated_bi,
 
         -- ── ctprod ────────────────────────────────────────────────────────
@@ -135,7 +136,7 @@ headers = [
     "Ativo (Equipamento)", "E/R", "Data Movimento", "Setor",
     "Atualiz. BI (movimento)",
     # equip
-    "Cód Produto", "Descrição Produto", "Serial Fabricante",
+    "Cód Produto", "Descrição Produto", "Serial Fabricante", "Situação Equip",
     "Atualiz. BI (equip)",
     # ctprod
     "Valor Unitário (R$)", "Atualiz. BI (ctprod)",
@@ -153,6 +154,7 @@ ws.row_dimensions[1].height = 32
 for row_idx, r in enumerate(rows, 2):
     envret   = str(r['envret'] or '').strip()
     sit_cont = SITUACAO_CONTRATO.get(str(r['situacao_contrato'] or '').strip(), r['situacao_contrato'] or '')
+    sit_eq   = str(r['situacao_equip'] or '').strip()
     vunit    = float(r['valor_unitario'] or 0)
 
     valores = [
@@ -160,7 +162,7 @@ for row_idx, r in enumerate(rows, 2):
         r['datavigini'], r['datavigfim'], r['dataalteracao'], r['contract_updated_bi'],
         r['ativo'], 'ENVIADO' if envret == 'E' else 'RETORNO', r['data_movimento'], r['setor'],
         r['movimento_updated_bi'],
-        r['cod_produto'], r['descricao_produto'], r['serial_fabricante'],
+        r['cod_produto'], r['descricao_produto'], r['serial_fabricante'], sit_eq,
         r['equip_updated_bi'],
         vunit, r['ctprod_updated_bi'],
     ]
@@ -176,7 +178,7 @@ for row_idx, r in enumerate(rows, 2):
         cell.fill   = row_fill
         cell.border = BRD
         cell.alignment = Alignment(vertical="center")
-        if col_idx == 18:   # Valor Unitário
+        if col_idx == 19:   # Valor Unitário
             cell.number_format = CURRENCY_FMT
             cell.alignment = Alignment(horizontal="right", vertical="center")
 
@@ -210,13 +212,16 @@ for col_idx in range(1, len(headers) + 1):
     cell.border    = BRD
 ws2.row_dimensions[1].height = 32
 
-ativos_no_contrato = [r for r in posicao.values() if str(r['envret'] or '').strip() == 'E']
-em_retorno         = [r for r in posicao.values() if str(r['envret'] or '').strip() == 'R']
+ativos_indisponivel = [r for r in posicao.values() if str(r['situacao_equip'] or '').strip().upper() == 'INDISPONIVEL']
+ativos_envret       = [r for r in posicao.values() if str(r['envret'] or '').strip() == 'E']
+em_retorno          = [r for r in posicao.values() if str(r['envret'] or '').strip() == 'R']
 
-print(f"  Posição atual: {len(ativos_no_contrato)} ativos em contrato, {len(em_retorno)} em retorno/devolvidos")
+print(f"  Posição atual (por envret):       {len(ativos_envret)} enviados / {len(em_retorno)} retornos")
+print(f"  Posição atual (por INDISPONIVEL): {len(ativos_indisponivel)} equipamentos alugados")
 
 for row_idx, r in enumerate(sorted(posicao.values(), key=lambda x: (str(x['contrato']), str(x['ativo']))), 2):
     envret   = str(r['envret'] or '').strip()
+    sit_eq   = str(r['situacao_equip'] or '').strip()
     sit_cont = SITUACAO_CONTRATO.get(str(r['situacao_contrato'] or '').strip(), r['situacao_contrato'] or '')
     vunit    = float(r['valor_unitario'] or 0)
 
@@ -225,7 +230,7 @@ for row_idx, r in enumerate(sorted(posicao.values(), key=lambda x: (str(x['contr
         r['datavigini'], r['datavigfim'], r['dataalteracao'], r['contract_updated_bi'],
         r['ativo'], 'ENVIADO' if envret == 'E' else 'RETORNO', r['data_movimento'], r['setor'],
         r['movimento_updated_bi'],
-        r['cod_produto'], r['descricao_produto'], r['serial_fabricante'],
+        r['cod_produto'], r['descricao_produto'], r['serial_fabricante'], sit_eq,
         r['equip_updated_bi'],
         vunit, r['ctprod_updated_bi'],
     ])
@@ -269,20 +274,22 @@ for r in rows:
     resumo[c]['vigfim']    = r['datavigfim']
     resumo[c]['total_mov'] += 1
     resumo[c]['equips_unicos'].add(str(r['ativo'] or ''))
-    envret = str(r['envret'] or '').strip()
+    envret  = str(r['envret'] or '').strip()
+    sit_eq  = str(r['situacao_equip'] or '').strip().upper()
     if envret == 'E':
         resumo[c]['ativos'] += 1
     elif envret == 'R':
         resumo[c]['retornos'] += 1
 
-# Valor da carteira = soma dos valorunitario dos equipamentos na posição atual E
+# Valor da carteira = equipamentos com situacao INDISPONIVEL (alugados) na posição atual
 for r in posicao.values():
-    if str(r['envret'] or '').strip() == 'E':
+    sit_eq = str(r['situacao_equip'] or '').strip().upper()
+    if sit_eq == 'INDISPONIVEL':
         c = str(r['contrato'])
         resumo[c]['valor_carteira'] += float(r['valor_unitario'] or 0)
 
 headers3 = ["Contrato", "Vendedor", "Situação", "Vigência Início", "Vigência Fim",
-            "Total Movimentos", "Equip Únicos", "Ativos (E)", "Retornos (R)",
+            "Total Movimentos", "Equip Únicos", "Ativos (E)", "INDISPONIVEL (alugados)",
             "Valor Carteira (R$)"]
 ws3.append(headers3)
 for col_idx in range(1, len(headers3) + 1):
@@ -294,10 +301,15 @@ for col_idx in range(1, len(headers3) + 1):
 ws3.row_dimensions[1].height = 28
 
 for row_idx, (contrato, d) in enumerate(sorted(resumo.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0), 2):
+    indisponivel = sum(
+        1 for eq, rv in posicao.items()
+        if str(rv['contrato']) == contrato
+        and str(rv['situacao_equip'] or '').strip().upper() == 'INDISPONIVEL'
+    )
     ws3.append([
         contrato, d['vendedor'], d['sit'], d['vigini'], d['vigfim'],
         d['total_mov'], len(d['equips_unicos']),
-        d['ativos'], d['retornos'],
+        d['ativos'], indisponivel,
         d['valor_carteira'],
     ])
     fill = ALT_FILL if row_idx % 2 == 0 else PatternFill()
