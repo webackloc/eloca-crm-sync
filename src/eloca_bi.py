@@ -193,6 +193,73 @@ def fetch_bi_faturamento() -> list[dict]:
         conn.close()
 
 
+def fetch_bi_ativos() -> list[dict]:
+    """
+    Retorna catálogo completo de equipamentos (tabela equip) com:
+      - Dados do produto (grupo_descricao, grupo2_descricao via join produtos)
+      - Posição atual (contrato + envret via último movimento de ctmequip)
+      - Flag de inconsistência quando situacao × envret divergem
+
+    Colunas: codigo, codigoproduto, produto_descricao, serial_fabricante,
+             situacao, tipo_equipamento, subtipo_equipamento,
+             contrato_atual, ultimo_envret, data_ultimo_mov,
+             inconsistente, bi_updated_at
+    """
+    sql = """
+        WITH last_move AS (
+            SELECT
+                CONVERT(VARCHAR(20), equipamento) AS equipamento,
+                CONVERT(VARCHAR(20), contrato)    AS contrato,
+                CONVERT(VARCHAR(1),  envret)      AS envret,
+                CONVERT(VARCHAR(10), data, 120)   AS data_mov,
+                ROW_NUMBER() OVER (
+                    PARTITION BY equipamento
+                    ORDER BY data DESC, seq DESC
+                ) AS rn
+            FROM ctmequip
+        )
+        SELECT
+            CONVERT(VARCHAR(20),  e.codigo)                         AS codigo,
+            ISNULL(CONVERT(VARCHAR(20),  e.codigoproduto), '')      AS codigoproduto,
+            ISNULL(CONVERT(VARCHAR(500), e.produto), '')            AS produto_descricao,
+            ISNULL(CONVERT(VARCHAR(200), e.seriefabricante), '')    AS serial_fabricante,
+            ISNULL(CONVERT(VARCHAR(50),  e.situacao), '')           AS situacao,
+            ISNULL(CONVERT(VARCHAR(200), p.grupo_descricao), '')    AS tipo_equipamento,
+            ISNULL(CONVERT(VARCHAR(200), p.grupo2_descricao), '')   AS subtipo_equipamento,
+            ISNULL(lm.contrato, '')                                 AS contrato_atual,
+            ISNULL(lm.envret,   '')                                 AS ultimo_envret,
+            ISNULL(lm.data_mov, '')                                 AS data_ultimo_mov,
+            CONVERT(VARCHAR(19), e.created_at, 120)                 AS bi_updated_at
+        FROM equip e
+        LEFT JOIN produtos p  ON p.codigo  = e.codigoproduto
+        LEFT JOIN last_move lm ON lm.equipamento = CONVERT(VARCHAR(20), e.codigo)
+                               AND lm.rn = 1
+        ORDER BY e.codigo
+    """
+    logger.info("[BI] Buscando catálogo de ativos (equip + produtos + posição) ...")
+    conn = _get_conn()
+    try:
+        cur = conn.cursor(as_dict=True)
+        cur.execute(sql)
+        rows = cur.fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            sit = (d.get('situacao') or '').upper()
+            er  = (d.get('ultimo_envret') or '').upper()
+            # Inconsistente: INDISPONÍVEL mas último mov é R, ou DISPONÍVEL mas último mov é E
+            indisp = 'INDISPON' in sit
+            d['inconsistente'] = (indisp and er == 'R') or (not indisp and er == 'E' and er != '')
+            result.append(d)
+        logger.info("[BI] bi_ativos: %d equipamentos.", len(result))
+        return result
+    except Exception as e:
+        logger.error("[BI] Erro ao buscar bi_ativos: %s", e)
+        raise
+    finally:
+        conn.close()
+
+
 def fetch_equipamentos_ativos() -> list[dict]:
     """
     Retorna equipamentos ativos:

@@ -22,6 +22,7 @@ from eloca_api  import ElocaApiClient, NovaOS
 from eloca_bi   import (
     fetch_carteira_contratos, fetch_equipamentos_ativos,
     fetch_bi_movimentacoes, fetch_bi_ctprod, fetch_bi_faturamento,
+    fetch_bi_ativos,
 )
 from supabase_sync import (
     get_client,
@@ -156,6 +157,14 @@ async def executar_sincronizacao():
         sync_bi_faturamento(supabase, faturamento)
     except Exception as e:
         msg = f"Erro ao sincronizar docrec (faturamento): {e}"
+        logger.error(msg)
+        erros.append(msg)
+
+    try:
+        ativos = fetch_bi_ativos()
+        sync_bi_ativos(supabase, ativos)
+    except Exception as e:
+        msg = f"Erro ao sincronizar catálogo de ativos (equip): {e}"
         logger.error(msg)
         erros.append(msg)
 
@@ -503,6 +512,37 @@ def sync_bi_faturamento(supabase, faturamento: list[dict]):
         except Exception as e:
             logger.warning("Erro em sync_bi_faturamento (lote %d): %s", len(lote), e)
     logger.info("sync_bi_faturamento: %d/%d registros inseridos/atualizados.", total, len(faturamento))
+
+
+def sync_bi_ativos(supabase, ativos: list[dict]):
+    """Upsert do catálogo de equipamentos na tabela bi_ativos via RPC.
+
+    Cada registro traz:
+      - Dados do equipamento (equip): codigo, produto, serial, situacao
+      - Tipo/subtipo (produtos): grupo_descricao, grupo2_descricao
+      - Posição atual (ctmequip): contrato_atual, ultimo_envret, data_ultimo_mov
+      - Flag de inconsistência: situacao × envret divergem
+    """
+    if not ativos:
+        return
+    from supabase_sync import _chunks
+    total = 0
+    # Serializar o campo boolean para string (RPC espera JSON)
+    payload = [
+        {**a, 'inconsistente': str(a.get('inconsistente', False)).lower()}
+        for a in ativos
+    ]
+    for lote in _chunks(payload, 500):
+        try:
+            res = supabase.rpc("sync_bi_ativos", {"p_data": lote}).execute()
+            total += res.data or 0
+        except Exception as e:
+            logger.warning("Erro em sync_bi_ativos (lote %d): %s", len(lote), e)
+    inconsistentes = sum(1 for a in ativos if a.get('inconsistente'))
+    logger.info(
+        "sync_bi_ativos: %d/%d equipamentos sincronizados. Inconsistentes: %d",
+        total, len(ativos), inconsistentes,
+    )
 
 
 async def processar_fila_criacao_os(pendentes: list[dict], supabase, api_token: str):
