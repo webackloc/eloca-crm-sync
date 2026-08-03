@@ -212,12 +212,15 @@ for col_idx in range(1, len(headers) + 1):
     cell.border    = BRD
 ws2.row_dimensions[1].height = 32
 
-ativos_indisponivel = [r for r in posicao.values() if str(r['situacao_equip'] or '').strip().upper() == 'INDISPONIVEL']
-ativos_envret       = [r for r in posicao.values() if str(r['envret'] or '').strip() == 'E']
-em_retorno          = [r for r in posicao.values() if str(r['envret'] or '').strip() == 'R']
+ativos_enviados = [r for r in posicao.values() if str(r['envret'] or '').strip() == 'E']
+em_retorno      = [r for r in posicao.values() if str(r['envret'] or '').strip() == 'R']
+# Inconsistentes: INDISPONÍVEL mas último mov = R, ou situação diz disponível mas último = E
+inconsistentes  = [r for r in posicao.values()
+                   if ('INDISPON' in str(r['situacao_equip'] or '').upper() and str(r['envret'] or '').strip() == 'R')
+                   or ('INDISPON' not in str(r['situacao_equip'] or '').upper() and str(r['envret'] or '').strip() == 'E')]
 
-print(f"  Posição atual (por envret):       {len(ativos_envret)} enviados / {len(em_retorno)} retornos")
-print(f"  Posição atual (por INDISPONIVEL): {len(ativos_indisponivel)} equipamentos alugados")
+print(f"  Posição atual: {len(ativos_enviados)} enviados (E) / {len(em_retorno)} retornos (R)")
+print(f"  Inconsistentes (sit_equip ≠ envret): {len(inconsistentes)}")
 
 for row_idx, r in enumerate(sorted(posicao.values(), key=lambda x: (str(x['contrato']), str(x['ativo']))), 2):
     envret   = str(r['envret'] or '').strip()
@@ -263,7 +266,7 @@ from collections import defaultdict
 resumo = defaultdict(lambda: {
     'vendedor': '', 'sit': '', 'vigini': '', 'vigfim': '',
     'total_mov': 0, 'ativos': 0, 'retornos': 0,
-    'valor_carteira': 0.0, 'equips_unicos': set()
+    'valor_carteira': 0.0, 'equips_unicos': set(),
 })
 
 for r in rows:
@@ -274,22 +277,22 @@ for r in rows:
     resumo[c]['vigfim']    = r['datavigfim']
     resumo[c]['total_mov'] += 1
     resumo[c]['equips_unicos'].add(str(r['ativo'] or ''))
-    envret  = str(r['envret'] or '').strip()
-    sit_eq  = str(r['situacao_equip'] or '').strip().upper()
+    envret = str(r['envret'] or '').strip()
     if envret == 'E':
         resumo[c]['ativos'] += 1
     elif envret == 'R':
         resumo[c]['retornos'] += 1
 
-# Valor da carteira = equipamentos com situacao INDISPONIVEL (alugados) na posição atual
+# Valor da carteira = equipamentos com último movimento ENVIADO (E) na posição atual
+# Critério correto: envret='E' garante que o equip está fisicamente no cliente.
+# Usar situacao_equip causava falsos positivos (INDISPONÍVEL + RETORNO = inconsistência BI).
 for r in posicao.values():
-    sit_eq = str(r['situacao_equip'] or '').strip().upper()
-    if sit_eq == 'INDISPONIVEL':
+    if str(r['envret'] or '').strip() == 'E':
         c = str(r['contrato'])
         resumo[c]['valor_carteira'] += float(r['valor_unitario'] or 0)
 
 headers3 = ["Contrato", "Vendedor", "Situação", "Vigência Início", "Vigência Fim",
-            "Total Movimentos", "Equip Únicos", "Ativos (E)", "INDISPONIVEL (alugados)",
+            "Total Movimentos", "Equip Únicos", "Ativos (E)", "Retornos (R)",
             "Valor Carteira (R$)"]
 ws3.append(headers3)
 for col_idx in range(1, len(headers3) + 1):
@@ -301,15 +304,10 @@ for col_idx in range(1, len(headers3) + 1):
 ws3.row_dimensions[1].height = 28
 
 for row_idx, (contrato, d) in enumerate(sorted(resumo.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0), 2):
-    indisponivel = sum(
-        1 for eq, rv in posicao.items()
-        if str(rv['contrato']) == contrato
-        and str(rv['situacao_equip'] or '').strip().upper() == 'INDISPONIVEL'
-    )
     ws3.append([
         contrato, d['vendedor'], d['sit'], d['vigini'], d['vigfim'],
         d['total_mov'], len(d['equips_unicos']),
-        d['ativos'], indisponivel,
+        d['ativos'], d['retornos'],
         d['valor_carteira'],
     ])
     fill = ALT_FILL if row_idx % 2 == 0 else PatternFill()
