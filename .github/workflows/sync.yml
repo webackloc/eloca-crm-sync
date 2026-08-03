@@ -1,9 +1,9 @@
 name: ELOCA ↔ CRM Sync
 
 on:
-  # schedule:
-  #   PAUSADO — ajustando relatório de comissões
-  #   - cron: '0,30 11-21 * * 1-5'
+  schedule:
+    # A cada 30 min, dias úteis, das 8h às 21h (horário UTC-3 → UTC 11-00)
+    - cron: '0,30 11-00 * * 1-5'
   workflow_dispatch:
     # Permite rodar manualmente pela aba Actions no GitHub
 
