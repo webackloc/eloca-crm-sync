@@ -104,11 +104,14 @@ cur.execute("""
       ON cp.contrato = CONVERT(VARCHAR(20), m.contrato)
      AND cp.produto  = ISNULL(CONVERT(VARCHAR(20), e.codigoproduto), '')
      AND cp.rn = 1
+    -- Exclui equipamentos INATIVOS: desativados não devem aparecer em nenhum cálculo
+    WHERE ISNULL(CONVERT(VARCHAR(50), e.situacao), '') NOT LIKE '%INATIV%'
     ORDER BY
-        CONVERT(INT, c.codigo),
-        m.equipamento,
+        -- Ordenar por data DESC globalmente (sem agrupar por contrato primeiro)
+        -- para que posicao[ativo] capture sempre o movimento mais recente de qualquer contrato
         m.data DESC,
-        m.seq  DESC
+        m.seq  DESC,
+        CONVERT(INT, c.codigo)
 """)
 
 rows = cur.fetchall()
@@ -214,13 +217,16 @@ ws2.row_dimensions[1].height = 32
 
 ativos_enviados = [r for r in posicao.values() if str(r['envret'] or '').strip() == 'E']
 em_retorno      = [r for r in posicao.values() if str(r['envret'] or '').strip() == 'R']
-# Inconsistentes: INDISPONÍVEL mas último mov = R, ou situação diz disponível mas último = E
-inconsistentes  = [r for r in posicao.values()
-                   if ('INDISPON' in str(r['situacao_equip'] or '').upper() and str(r['envret'] or '').strip() == 'R')
-                   or ('INDISPON' not in str(r['situacao_equip'] or '').upper() and str(r['envret'] or '').strip() == 'E')]
+# Equipamentos INDISPONÍVEL (excl. INATIVO — já filtrado no SQL, mas garantia extra)
+ativos_indisp   = [r for r in posicao.values()
+                   if 'INDISPON' in str(r['situacao_equip'] or '').upper()
+                   and 'INATIV' not in str(r['situacao_equip'] or '').upper()]
+# Inconsistentes: INDISPONÍVEL mas último mov global = R
+inconsistentes  = [r for r in ativos_indisp if str(r['envret'] or '').strip() == 'R']
 
-print(f"  Posição atual: {len(ativos_enviados)} enviados (E) / {len(em_retorno)} retornos (R)")
-print(f"  Inconsistentes (sit_equip ≠ envret): {len(inconsistentes)}")
+print(f"  Posição atual (último mov global): {len(ativos_enviados)} enviados / {len(em_retorno)} retornos")
+print(f"  INDISPONÍVEL (excl. INATIVO): {len(ativos_indisp)}")
+print(f"  Inconsistentes (INDISPONÍVEL + RETORNO): {len(inconsistentes)}")
 
 for row_idx, r in enumerate(sorted(posicao.values(), key=lambda x: (str(x['contrato']), str(x['ativo']))), 2):
     envret   = str(r['envret'] or '').strip()
@@ -283,11 +289,13 @@ for r in rows:
     elif envret == 'R':
         resumo[c]['retornos'] += 1
 
-# Valor da carteira = equipamentos com último movimento ENVIADO (E) na posição atual
-# Critério correto: envret='E' garante que o equip está fisicamente no cliente.
-# Usar situacao_equip causava falsos positivos (INDISPONÍVEL + RETORNO = inconsistência BI).
+# Valor da carteira = INDISPONÍVEL (excl. INATIVO) com último mov global = ENVIADO
+# - ORDER BY corrigido: data DESC global → posicao reflete o contrato/mov mais recente
+# - INATIVO excluído no SQL (WHERE) e confirmado aqui
+# - INDISPONÍVEL + RETORNO = inconsistência BI (equip devolvido mas status desatualizado)
 for r in posicao.values():
-    if str(r['envret'] or '').strip() == 'E':
+    sit = str(r['situacao_equip'] or '').upper()
+    if 'INDISPON' in sit and 'INATIV' not in sit and str(r['envret'] or '').strip() == 'E':
         c = str(r['contrato'])
         resumo[c]['valor_carteira'] += float(r['valor_unitario'] or 0)
 

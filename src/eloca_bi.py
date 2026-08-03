@@ -234,6 +234,8 @@ def fetch_bi_ativos() -> list[dict]:
         LEFT JOIN produtos p  ON p.codigo  = e.codigoproduto
         LEFT JOIN last_move lm ON lm.equipamento = CONVERT(VARCHAR(20), e.codigo)
                                AND lm.rn = 1
+        -- Exclui INATIVO: equipamento desativado não deve entrar em nenhum cálculo de carteira
+        WHERE ISNULL(CONVERT(VARCHAR(50), e.situacao), '') NOT LIKE '%INATIV%'
         ORDER BY e.codigo
     """
     logger.info("[BI] Buscando catálogo de ativos (equip + produtos + posição) ...")
