@@ -26,7 +26,7 @@ from eloca_bi   import (
 )
 from supabase_sync import (
     get_client,
-    upload_csv,
+    # upload_csv,  # desativado — bucket bloqueado por RLS do Lovable
     upsert_ativos,
     upsert_ordens_servico,
     buscar_os_pendentes_criacao,
@@ -213,33 +213,17 @@ async def executar_sincronizacao():
         _log_fim(supabase, log_id, inicio, ativos_total, os_total, carteira_total, erros)
         return
 
-    # ── 3. Extração via API HTTP (ativos e OS) ────────────────────────────────
+    # ── 3. Extração via API HTTP (OS) ─────────────────────────────────────────
+    # NOTA: listar_ativos() desativado — catálogo de equipamentos agora vem do
+    # BI via bi_ativos (fetch_bi_ativos), que é mais completo e não exige login.
+    # Reativar aqui se precisar de campos exclusivos da API: endereço, marca,
+    # modelo, valor_compra, valor_mercado, fornecedor.
     async with ElocaApiClient(api_token, user_id, empresa) as api:
-
-        # Ativos
-        try:
-            ativos = await api.listar_ativos()
-            ativos_total = len(ativos)
-            csv_ativos = ElocaApiClient.ativos_para_csv(ativos)
-            try:
-                upload_csv(supabase, "ativos.csv", csv_ativos)
-            except Exception as e_csv:
-                logger.warning("Upload CSV ativos ignorado: %s", e_csv)
-            upsert_ativos_supabase(supabase, ativos)
-        except Exception as e:
-            msg = f"Erro ao buscar ativos: {e}"
-            logger.error(msg)
-            erros.append(msg)
 
         # OS (com retry automático se sessão CGI expirar)
         try:
             os_list = await _buscar_os_com_retry(api)
             os_total = len(os_list)
-            csv_os  = ElocaApiClient.os_para_csv(os_list)
-            try:
-                upload_csv(supabase, "ordens_servico.csv", csv_os)
-            except Exception as e_csv:
-                logger.warning("Upload CSV OS ignorado: %s", e_csv)
             upsert_os_supabase(supabase, os_list)
         except Exception as e:
             msg = f"Erro ao buscar OS: {e}"
