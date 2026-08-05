@@ -1,0 +1,36 @@
+name: Diagnóstico — Validar Ativo/Contrato
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependências do sistema
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends freetds-dev freetds-bin
+
+      - name: Instalar dependências Python
+        run: pip install --no-cache-dir pymssql supabase
+
+      - name: Executar diagnóstico
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BI_HOST:     ${{ secrets.BI_HOST }}
+          BI_PORT:     ${{ secrets.BI_PORT }}
+          BI_DATABASE: ${{ secrets.BI_DATABASE }}
+          BI_USER:     ${{ secrets.BI_USER }}
+          BI_PASSWORD: ${{ secrets.BI_PASSWORD }}
+          PYTHONPATH:  ${{ github.workspace }}/src
+        run: python src/diagnostico_ativo.py
