@@ -44,7 +44,7 @@ try:
             ISNULL(CONVERT(VARCHAR(50),  e.situacao),'') AS situacao,
             ISNULL(CONVERT(VARCHAR(200), e.seriefabricante),'') AS serial
         FROM equip e
-        WHERE e.codigo IN (8001, 8002, 8003)
+        WHERE CONVERT(VARCHAR(20), e.codigo) IN ('8001', '8002', '8003')
     """)
     rows = cur.fetchall()
     if rows:
@@ -101,7 +101,7 @@ try:
             CONVERT(VARCHAR(10), data, 120)   AS data,
             CONVERT(VARCHAR(20), numos)       AS numos
         FROM ctmequip
-        WHERE equipamento IN (8001, 8002, 8003)
+        WHERE CONVERT(VARCHAR(20), equipamento) IN ('8001', '8002', '8003')
         ORDER BY recnum DESC
     """)
     rows = cur.fetchall()
@@ -115,34 +115,62 @@ except Exception as e:
     print(f"  ERRO BI ctmequip: {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Supabase — bi_ativos
+# 4. Supabase — bi_ativos via RPC
 # ─────────────────────────────────────────────────────────────────────────────
-sep("Supabase — bi_ativos (8001, 8002, 8003)")
+sep("Supabase — bi_ativos (8001, 8002, 8003) via RPC")
 try:
     sb  = get_sb()
-    res = sb.table("bi_ativos").select(
-        "codigo, produto_descricao, situacao, contrato_atual, ultimo_envret, data_ultimo_mov, inconsistente"
-    ).in_("codigo", ["8001","8002","8003"]).execute()
+    res = sb.rpc("diagnostico_bi_ativos", {"p_codigos": ["8001","8002","8003"]}).execute()
     if res.data:
         for r in res.data:
             print(f"  {r['codigo']} | {r['situacao']} | envret={r['ultimo_envret']} | contrato={r['contrato_atual']} | {r['data_ultimo_mov']}")
     else:
         print("  ⚠️  Nenhum dos ativos encontrado no Supabase bi_ativos")
 except Exception as e:
-    print(f"  ERRO Supabase bi_ativos: {e}")
+    # fallback: tenta com postgrest usando service key (bypass RLS)
+    try:
+        import httpx, json
+        url = os.getenv("SUPABASE_URL").rstrip("/")
+        key = os.getenv("SUPABASE_SERVICE_KEY")
+        r = httpx.get(
+            f"{url}/rest/v1/bi_ativos",
+            params={"codigo": "in.(8001,8002,8003)", "select": "codigo,situacao,contrato_atual,ultimo_envret,data_ultimo_mov"},
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=15
+        )
+        rows = r.json()
+        if isinstance(rows, list) and rows:
+            for row in rows:
+                print(f"  {row.get('codigo')} | {row.get('situacao')} | envret={row.get('ultimo_envret')} | contrato={row.get('contrato_atual')} | {row.get('data_ultimo_mov')}")
+        elif isinstance(rows, list):
+            print("  ⚠️  Nenhum dos ativos encontrado no Supabase bi_ativos")
+        else:
+            print(f"  ERRO REST: {rows}")
+    except Exception as e2:
+        print(f"  ERRO Supabase bi_ativos: {e} | {e2}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Supabase — carteira_contratos
+# 5. Supabase — carteira_contratos via REST
 # ─────────────────────────────────────────────────────────────────────────────
 sep("Supabase — carteira_contratos (326)")
 try:
-    sb  = get_sb()
-    res = sb.table("carteira_contratos").select("*").eq("id", "326").execute()
-    if res.data:
-        r = res.data[0]
-        print(f"  contrato={r.get('id')} | cliente={r.get('cliente_nome')} | situacao={r.get('situacao')} | {r.get('data_inicio')} → {r.get('data_fim')}")
-    else:
+    import httpx
+    url = os.getenv("SUPABASE_URL").rstrip("/")
+    key = os.getenv("SUPABASE_SERVICE_KEY")
+    r = httpx.get(
+        f"{url}/rest/v1/carteira_contratos",
+        params={"id": "eq.326", "select": "*"},
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        timeout=15
+    )
+    rows = r.json()
+    if isinstance(rows, list) and rows:
+        row = rows[0]
+        print(f"  contrato={row.get('id')} | cliente={row.get('cliente_nome')} | situacao={row.get('situacao')} | {row.get('data_inicio')} → {row.get('data_fim')}")
+    elif isinstance(rows, list):
         print("  ⚠️  Contrato 326 NÃO encontrado no Supabase carteira_contratos")
+    else:
+        print(f"  ERRO REST: {rows}")
 except Exception as e:
     print(f"  ERRO Supabase carteira_contratos: {e}")
 
