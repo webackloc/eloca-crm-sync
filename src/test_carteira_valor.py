@@ -7,53 +7,62 @@ conn = pymssql.connect(
 )
 cur = conn.cursor(as_dict=True)
 
-print("=== Contrato 51 — quantos setores em ctprod? ===")
-cur.execute("""
-    SELECT setor, COUNT(*) AS linhas,
-           SUM(CONVERT(DECIMAL(18,2), valorunitario)) AS valor_setor
-    FROM ctprod WHERE contrato = '51'
-    GROUP BY setor ORDER BY valor_setor DESC
-""")
-for r in cur.fetchall(): print(dict(r))
-
-print("\n=== Contrato 51 — equipamentos reais em campo (ctmequip) ===")
+print("=== Contrato 51 — join com setor do ctmequip ===")
 cur.execute("""
     WITH last_move AS (
-        SELECT CONVERT(VARCHAR(20), equipamento) AS equipamento,
-               CONVERT(VARCHAR(20), contrato) AS contrato,
-               CONVERT(VARCHAR(1), envret) AS envret,
-               ROW_NUMBER() OVER (PARTITION BY equipamento ORDER BY data DESC, seq DESC) AS rn
+        SELECT
+            CONVERT(VARCHAR(20), equipamento) AS equipamento,
+            CONVERT(VARCHAR(20), contrato)    AS contrato,
+            CONVERT(VARCHAR(1),  envret)      AS envret,
+            ISNULL(CONVERT(VARCHAR(500), setor), '') AS setor,
+            ROW_NUMBER() OVER (
+                PARTITION BY equipamento
+                ORDER BY data DESC, seq DESC
+            ) AS rn
         FROM ctmequip
     )
-    SELECT COUNT(*) AS qtd
+    SELECT
+        COUNT(lm.equipamento)                              AS qtd_equip,
+        SUM(ISNULL(CONVERT(DECIMAL(18,2), cp.valorunitario), 0)) AS valor_mensal
     FROM last_move lm
     JOIN equip e ON CONVERT(VARCHAR(20), e.codigo) = lm.equipamento
-    WHERE lm.rn=1 AND lm.contrato='51' AND lm.envret='E'
-      AND ISNULL(CONVERT(VARCHAR(50), e.situacao),'') NOT LIKE '%INATIV%'
+    LEFT JOIN ctprod cp ON CONVERT(VARCHAR(20), cp.contrato) = lm.contrato
+                       AND cp.produto = e.codigoproduto
+                       AND ISNULL(CONVERT(VARCHAR(500), cp.setor), '') = lm.setor
+    WHERE lm.rn = 1
+      AND lm.contrato = '51'
+      AND lm.envret = 'E'
+      AND ISNULL(CONVERT(VARCHAR(50), e.situacao), '') NOT LIKE '%INATIV%'
 """)
 print(dict(cur.fetchone()))
 
-print("\n=== Contrato 51 — valor usando setor vazio (principal) ===")
+print("\n=== Total geral com join por setor ===")
 cur.execute("""
     WITH last_move AS (
-        SELECT CONVERT(VARCHAR(20), equipamento) AS equipamento,
-               CONVERT(VARCHAR(20), contrato) AS contrato,
-               CONVERT(VARCHAR(1), envret) AS envret,
-               ROW_NUMBER() OVER (PARTITION BY equipamento ORDER BY data DESC, seq DESC) AS rn
+        SELECT
+            CONVERT(VARCHAR(20), equipamento) AS equipamento,
+            CONVERT(VARCHAR(20), contrato)    AS contrato,
+            CONVERT(VARCHAR(1),  envret)      AS envret,
+            ISNULL(CONVERT(VARCHAR(500), setor), '') AS setor,
+            ROW_NUMBER() OVER (
+                PARTITION BY equipamento
+                ORDER BY data DESC, seq DESC
+            ) AS rn
         FROM ctmequip
-    ),
-    preco AS (
-        SELECT contrato, produto, MIN(CONVERT(DECIMAL(18,2), valorunitario)) AS valorunitario
-        FROM ctprod
-        WHERE contrato = '51'
-        GROUP BY contrato, produto
     )
-    SELECT COUNT(lm.equipamento) AS qtd, SUM(ISNULL(p.valorunitario,0)) AS valor
+    SELECT
+        COUNT(DISTINCT lm.contrato)                            AS contratos,
+        COUNT(lm.equipamento)                                  AS equipamentos,
+        SUM(ISNULL(CONVERT(DECIMAL(18,2), cp.valorunitario), 0)) AS valor_total
     FROM last_move lm
     JOIN equip e ON CONVERT(VARCHAR(20), e.codigo) = lm.equipamento
-    LEFT JOIN preco p ON p.contrato = lm.contrato AND p.produto = e.codigoproduto
-    WHERE lm.rn=1 AND lm.contrato='51' AND lm.envret='E'
-      AND ISNULL(CONVERT(VARCHAR(50), e.situacao),'') NOT LIKE '%INATIV%'
+    JOIN contract c ON c.codigo = lm.contrato AND c.situacao = '3'
+    LEFT JOIN ctprod cp ON CONVERT(VARCHAR(20), cp.contrato) = lm.contrato
+                       AND cp.produto = e.codigoproduto
+                       AND ISNULL(CONVERT(VARCHAR(500), cp.setor), '') = lm.setor
+    WHERE lm.rn = 1
+      AND lm.envret = 'E'
+      AND ISNULL(CONVERT(VARCHAR(50), e.situacao), '') NOT LIKE '%INATIV%'
 """)
 print(dict(cur.fetchone()))
 conn.close()
