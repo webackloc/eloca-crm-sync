@@ -38,3 +38,13 @@ for tabela in tabelas:
         print(f"  {tabela}: ERRO - {e}")
 
 conn.close()
+
+# Inspecionar docpag
+print("\n=== DOCPAG — colunas reais ===")
+cur.execute("""
+    SELECT TOP 1 * FROM docpag ORDER BY recnum DESC
+""")
+row = cur.fetchone()
+if row:
+    for k, v in row.items():
+        print(f"  {k}: {v}")

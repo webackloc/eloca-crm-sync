@@ -68,7 +68,7 @@ def fetch_carteira_contratos() -> list[dict]:
         cur = conn.cursor(as_dict=True)
         cur.execute(sql)
         rows = cur.fetchall()
-        result = [dict(r) for r in rows]
+        result = [{k: float(v) if hasattr(v, "__round__") and not isinstance(v, int) else v for k, v in dict(r).items()} for r in rows]
         logger.info("[BI] Contratos ativos encontrados: %d", len(result))
         return result
     except Exception as e:
@@ -112,7 +112,7 @@ def fetch_bi_movimentacoes(ultimo_recnum: int = 0) -> list[dict]:
         cur = conn.cursor(as_dict=True)
         cur.execute(sql, {"ultimo_recnum": ultimo_recnum})
         rows = cur.fetchall()
-        result = [dict(r) for r in rows]
+        result = [{k: float(v) if hasattr(v, "__round__") and not isinstance(v, int) else v for k, v in dict(r).items()} for r in rows]
         logger.info("[BI] ctmequip: %d registros novos.", len(result))
         return result
     except Exception as e:
@@ -152,7 +152,7 @@ def fetch_bi_ctprod(ultimo_recnum: int = 0) -> list[dict]:
         cur = conn.cursor(as_dict=True)
         cur.execute(sql, {"ultimo_recnum": ultimo_recnum})
         rows = cur.fetchall()
-        result = [dict(r) for r in rows]
+        result = [{k: float(v) if hasattr(v, "__round__") and not isinstance(v, int) else v for k, v in dict(r).items()} for r in rows]
         logger.info("[BI] ctprod: %d registros novos.", len(result))
         return result
     except Exception as e:
@@ -199,7 +199,7 @@ def fetch_bi_faturamento(janela_dias: int = 90) -> list[dict]:
         cur = conn.cursor(as_dict=True)
         cur.execute(sql, {"janela_dias": janela_dias})
         rows = cur.fetchall()
-        result = [dict(r) for r in rows]
+        result = [{k: float(v) if hasattr(v, "__round__") and not isinstance(v, int) else v for k, v in dict(r).items()} for r in rows]
         logger.info("[BI] docrec: %d registros.", len(result))
         return result
     except Exception as e:
@@ -324,7 +324,7 @@ def fetch_equipamentos_ativos() -> list[dict]:
         cur = conn.cursor(as_dict=True)
         cur.execute(sql)
         rows = cur.fetchall()
-        result = [dict(r) for r in rows]
+        result = [{k: float(v) if hasattr(v, "__round__") and not isinstance(v, int) else v for k, v in dict(r).items()} for r in rows]
         logger.info("[BI] Equipamentos ativos encontrados: %d", len(result))
         return result
     except Exception as e:
@@ -360,7 +360,7 @@ def fetch_bi_contas_pagar(janela_dias: int = 120) -> list[dict]:
         cur = conn.cursor(as_dict=True)
         cur.execute(sql, {"janela_dias": janela_dias})
         rows = cur.fetchall()
-        result = [dict(r) for r in rows]
+        result = [{k: float(v) if hasattr(v, "__round__") and not isinstance(v, int) else v for k, v in dict(r).items()} for r in rows]
         logger.info("[BI] docpag: %d registros.", len(result))
         return result
     except Exception as e:
@@ -421,7 +421,7 @@ def fetch_bi_carteira_valor() -> list[dict]:
         cur = conn.cursor(as_dict=True)
         cur.execute(sql)
         rows = cur.fetchall()
-        result = [dict(r) for r in rows]
+        result = [{k: float(v) if hasattr(v, "__round__") and not isinstance(v, int) else v for k, v in dict(r).items()} for r in rows]
         logger.info("[BI] Carteira com valor: %d contratos.", len(result))
         return result
     except Exception as e:
