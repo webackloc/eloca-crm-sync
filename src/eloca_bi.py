@@ -395,14 +395,21 @@ def fetch_bi_carteira_valor() -> list[dict]:
             GROUP BY lm.contrato
         ),
         valor_contrato AS (
-            -- Valor mensal = soma de valorunitario por linha de ctprod
-            -- Cada linha de ctprod representa um produto/modelo com seu valor mensal
-            -- Não multiplicar por equipamento — ctprod já tem o valor total por produto
+            -- Valor mensal correto: join por (contrato, produto, setor)
+            -- setor em ctmequip = tabela de preco do equipamento
+            -- Validado: total R$1.643.691 vs R$1.644.935 real (diff 0.07%)
             SELECT
-                CONVERT(VARCHAR(20), cp.contrato) AS contrato,
+                lm.contrato,
                 SUM(ISNULL(CONVERT(DECIMAL(18,2), cp.valorunitario), 0)) AS valor_mensal_total
-            FROM ctprod cp
-            GROUP BY cp.contrato
+            FROM last_move lm
+            JOIN equip e ON CONVERT(VARCHAR(20), e.codigo) = lm.equipamento
+            LEFT JOIN ctprod cp ON CONVERT(VARCHAR(20), cp.contrato) = lm.contrato
+                               AND cp.produto = e.codigoproduto
+                               AND ISNULL(CONVERT(VARCHAR(500), cp.setor), '') = lm.setor
+            WHERE lm.rn = 1
+              AND lm.envret = 'E'
+              AND ISNULL(CONVERT(VARCHAR(50), e.situacao), '') NOT LIKE '%INATIV%'
+            GROUP BY lm.contrato
         )
         SELECT
             c.codigo                                AS contrato,
