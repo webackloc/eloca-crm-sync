@@ -1,0 +1,16 @@
+name: Test carteira valor
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install pymssql
+      - name: Test
+        env:
+          BI_PASSWORD: ${{ secrets.BI_PASSWORD }}
+        run: python3 src/test_carteira_valor.py
