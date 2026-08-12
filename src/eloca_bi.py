@@ -332,3 +332,100 @@ def fetch_equipamentos_ativos() -> list[dict]:
         raise
     finally:
         conn.close()
+
+
+def fetch_bi_contas_pagar(janela_dias: int = 120) -> list[dict]:
+    sql = """
+        SELECT
+            CONVERT(VARCHAR(30), dp.numpagamento)       AS numpagamento,
+            NULLIF(LTRIM(RTRIM(
+                ISNULL(CONVERT(VARCHAR(20), dp.contrato), '')
+            )), '')                                      AS contrato,
+            CONVERT(VARCHAR(20), dp.codigofornecedor)   AS codigofornecedor,
+            ISNULL(CONVERT(VARCHAR(200), dp.fornecedor), '') AS fornecedor,
+            CONVERT(VARCHAR(30), dp.valorpagamento)     AS valorpagamento,
+            CONVERT(VARCHAR(10), dp.dataemissao, 120)   AS dataemissao,
+            CONVERT(VARCHAR(10), dp.datavencto,  120)   AS datavencto,
+            CONVERT(VARCHAR(10), dp.datapagamento, 120) AS datapagamento,
+            ISNULL(CONVERT(VARCHAR(1), dp.liquidado), ' ') AS liquidado,
+            ISNULL(CONVERT(VARCHAR(100), dp.tipodocumento), '') AS tipodocumento,
+            ISNULL(CONVERT(VARCHAR(500), dp.historico), '')     AS historico
+        FROM docpag dp
+        WHERE dp.datavencto >= DATEADD(day, -%(janela_dias)s, GETDATE())
+        ORDER BY dp.numpagamento
+    """
+    logger.info("[BI] Buscando docpag (últimos %d dias) ...", janela_dias)
+    conn = _get_conn()
+    try:
+        cur = conn.cursor(as_dict=True)
+        cur.execute(sql, {"janela_dias": janela_dias})
+        rows = cur.fetchall()
+        result = [dict(r) for r in rows]
+        logger.info("[BI] docpag: %d registros.", len(result))
+        return result
+    except Exception as e:
+        logger.error("[BI] Erro ao buscar docpag: %s", e)
+        raise
+    finally:
+        conn.close()
+
+
+def fetch_bi_carteira_valor() -> list[dict]:
+    sql = """
+        WITH last_move AS (
+            SELECT
+                CONVERT(VARCHAR(20), equipamento) AS equipamento,
+                CONVERT(VARCHAR(20), contrato)    AS contrato,
+                CONVERT(VARCHAR(1),  envret)      AS envret,
+                ROW_NUMBER() OVER (
+                    PARTITION BY equipamento
+                    ORDER BY data DESC, seq DESC
+                ) AS rn
+            FROM ctmequip
+        ),
+        equip_em_contrato AS (
+            SELECT lm.contrato, COUNT(lm.equipamento) AS qtd_equipamentos
+            FROM last_move lm
+            JOIN equip e ON CONVERT(VARCHAR(20), e.codigo) = lm.equipamento
+            WHERE lm.rn = 1
+              AND lm.envret = 'E'
+              AND ISNULL(CONVERT(VARCHAR(50), e.situacao), '') NOT LIKE '%INATIV%'
+            GROUP BY lm.contrato
+        ),
+        valor_contrato AS (
+            SELECT
+                CONVERT(VARCHAR(20), contrato) AS contrato,
+                SUM(ISNULL(valorunitario, 0) * ISNULL(quantidade, 1)) AS valor_mensal_total
+            FROM ctprod
+            GROUP BY contrato
+        )
+        SELECT
+            c.codigo                                AS contrato,
+            c.cliente                               AS cliente_codigo,
+            (SELECT TOP 1 d.cliente FROM docrec d
+             WHERE d.codigocliente = c.cliente
+             ORDER BY d.recnum DESC)                AS cliente_nome,
+            ISNULL(ec.qtd_equipamentos, 0)          AS qtd_equipamentos,
+            ISNULL(vc.valor_mensal_total, 0)        AS valor_mensal_total,
+            CONVERT(VARCHAR(10), c.datavigini, 120) AS datavigini,
+            CONVERT(VARCHAR(10), c.datavigfim, 120) AS datavigfim
+        FROM contract c
+        LEFT JOIN equip_em_contrato ec ON ec.contrato = c.codigo
+        LEFT JOIN valor_contrato     vc ON vc.contrato = c.codigo
+        WHERE c.situacao = '3'
+        ORDER BY vc.valor_mensal_total DESC
+    """
+    logger.info("[BI] Buscando valor real por contrato ...")
+    conn = _get_conn()
+    try:
+        cur = conn.cursor(as_dict=True)
+        cur.execute(sql)
+        rows = cur.fetchall()
+        result = [dict(r) for r in rows]
+        logger.info("[BI] Carteira com valor: %d contratos.", len(result))
+        return result
+    except Exception as e:
+        logger.error("[BI] Erro ao buscar carteira com valor: %s", e)
+        raise
+    finally:
+        conn.close()

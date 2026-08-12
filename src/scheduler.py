@@ -22,7 +22,7 @@ from eloca_api  import ElocaApiClient, NovaOS
 from eloca_bi   import (
     fetch_carteira_contratos, fetch_equipamentos_ativos,
     fetch_bi_movimentacoes, fetch_bi_ctprod, fetch_bi_faturamento,
-    fetch_bi_ativos,
+    fetch_bi_ativos, fetch_bi_contas_pagar, fetch_bi_carteira_valor,
 )
 from supabase_sync import (
     get_client,
@@ -66,7 +66,7 @@ def _update_sync_state(supabase, tabela: str, recnum: int) -> None:
         logger.warning("Não foi possível atualizar sync_state para %s: %s", tabela, e)
 
 
-def _log_inicio(supabase, inicio: datetime) -> int | None:
+def _log_inicio(supabase, inicio: datetime) -> "int | None":
     """Insere linha de início na tabela sync_logs via RPC e retorna o id gerado."""
     try:
         res = supabase.rpc("log_sync_inicio", {}).execute()
@@ -76,7 +76,7 @@ def _log_inicio(supabase, inicio: datetime) -> int | None:
         return None
 
 
-def _log_fim(supabase, log_id: int | None, inicio: datetime,
+def _log_fim(supabase, log_id, inicio: datetime,
              ativos_total: int, os_total: int, carteira_total: int,
              erros: list[str]):
     """Atualiza a linha de log com o resultado final do ciclo via RPC."""
@@ -188,6 +188,24 @@ async def executar_sincronizacao():
         sync_bi_faturamento(supabase, faturamento)
     except Exception as e:
         msg = f"Erro ao sincronizar docrec (faturamento): {e}"
+        logger.error(msg)
+        erros.append(msg)
+
+    # Contas a pagar (docpag)
+    try:
+        contas_pagar = fetch_bi_contas_pagar(janela_dias=120)
+        sync_bi_contas_pagar(supabase, contas_pagar)
+    except Exception as e:
+        msg = f"Erro ao sincronizar docpag: {e}"
+        logger.error(msg)
+        erros.append(msg)
+
+    # Carteira com valor mensal real
+    try:
+        carteira_valor = fetch_bi_carteira_valor()
+        sync_bi_carteira_valor(supabase, carteira_valor)
+    except Exception as e:
+        msg = f"Erro ao sincronizar carteira com valor: {e}"
         logger.error(msg)
         erros.append(msg)
 
@@ -638,3 +656,33 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+def sync_bi_contas_pagar(supabase, contas_pagar: list[dict]):
+    """Upsert de docpag na tabela bi_contas_pagar via RPC."""
+    if not contas_pagar:
+        return
+    from supabase_sync import _chunks
+    total = 0
+    for lote in _chunks(contas_pagar, 500):
+        try:
+            res = supabase.rpc("sync_bi_contas_pagar", {"p_data": lote}).execute()
+            total += res.data or 0
+        except Exception as e:
+            logger.warning("Erro em sync_bi_contas_pagar (lote %d): %s", len(lote), e)
+    logger.info("sync_bi_contas_pagar: %d/%d registros.", total, len(contas_pagar))
+
+
+def sync_bi_carteira_valor(supabase, carteira: list[dict]):
+    """Upsert da carteira com valor mensal real via RPC."""
+    if not carteira:
+        return
+    from supabase_sync import _chunks
+    total = 0
+    for lote in _chunks(carteira, 500):
+        try:
+            res = supabase.rpc("sync_bi_carteira_valor", {"p_data": lote}).execute()
+            total += res.data or 0
+        except Exception as e:
+            logger.warning("Erro em sync_bi_carteira_valor (lote %d): %s", len(lote), e)
+    logger.info("sync_bi_carteira_valor: %d/%d contratos.", total, len(carteira))
