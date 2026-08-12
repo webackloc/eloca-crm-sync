@@ -376,9 +376,10 @@ def fetch_bi_carteira_valor() -> list[dict]:
     sql = """
         WITH last_move AS (
             SELECT
-                CONVERT(VARCHAR(20), equipamento) AS equipamento,
-                CONVERT(VARCHAR(20), contrato)    AS contrato,
-                CONVERT(VARCHAR(1),  envret)      AS envret,
+                CONVERT(VARCHAR(20), equipamento)            AS equipamento,
+                CONVERT(VARCHAR(20), contrato)               AS contrato,
+                CONVERT(VARCHAR(1),  envret)                 AS envret,
+                ISNULL(CONVERT(VARCHAR(500), setor), '')     AS setor,
                 ROW_NUMBER() OVER (
                     PARTITION BY equipamento
                     ORDER BY data DESC, seq DESC
