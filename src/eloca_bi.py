@@ -395,21 +395,14 @@ def fetch_bi_carteira_valor() -> list[dict]:
             GROUP BY lm.contrato
         ),
         valor_contrato AS (
-            -- Valor mensal = soma de valorunitario por equipamento enviado (envret=E)
-            -- quantidade em ctprod é sempre 0; usar contagem real de equip em campo
+            -- Valor mensal = soma de valorunitario por linha de ctprod
+            -- Cada linha de ctprod representa um produto/modelo com seu valor mensal
+            -- Não multiplicar por equipamento — ctprod já tem o valor total por produto
             SELECT
-                CONVERT(VARCHAR(20), lm.contrato) AS contrato,
-                SUM(
-                    ISNULL(CONVERT(DECIMAL(18,2), cp.valorunitario), 0)
-                ) AS valor_mensal_total
-            FROM last_move lm
-            JOIN equip e ON CONVERT(VARCHAR(20), e.codigo) = lm.equipamento
-            JOIN ctprod cp ON CONVERT(VARCHAR(20), cp.contrato) = lm.contrato
-                          AND cp.produto = e.codigoproduto
-            WHERE lm.rn = 1
-              AND lm.envret = 'E'
-              AND ISNULL(CONVERT(VARCHAR(50), e.situacao), '') NOT LIKE '%INATIV%'
-            GROUP BY lm.contrato
+                CONVERT(VARCHAR(20), cp.contrato) AS contrato,
+                SUM(ISNULL(CONVERT(DECIMAL(18,2), cp.valorunitario), 0)) AS valor_mensal_total
+            FROM ctprod cp
+            GROUP BY cp.contrato
         )
         SELECT
             c.codigo                                AS contrato,
