@@ -397,7 +397,7 @@ def fetch_bi_carteira_valor() -> list[dict]:
         valor_contrato AS (
             SELECT
                 CONVERT(VARCHAR(20), contrato) AS contrato,
-                SUM(ISNULL(valorunitario, 0) * ISNULL(quantidade, 1)) AS valor_mensal_total
+                SUM(ISNULL(CONVERT(DECIMAL(18,2), valorunitario), 0) * ISNULL(CONVERT(INT, quantidade), 1)) AS valor_mensal_total
             FROM ctprod
             GROUP BY contrato
         )
