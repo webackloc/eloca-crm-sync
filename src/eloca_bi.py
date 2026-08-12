@@ -337,22 +337,24 @@ def fetch_equipamentos_ativos() -> list[dict]:
 def fetch_bi_contas_pagar(janela_dias: int = 120) -> list[dict]:
     sql = """
         SELECT
-            CONVERT(VARCHAR(30), dp.numpagamento)       AS numpagamento,
+            CONVERT(VARCHAR(30), dp.numfatura)          AS numfatura,
+            CONVERT(VARCHAR(30), dp.recnum)             AS recnum,
             NULLIF(LTRIM(RTRIM(
                 ISNULL(CONVERT(VARCHAR(20), dp.contrato), '')
             )), '')                                      AS contrato,
             CONVERT(VARCHAR(20), dp.codigofornecedor)   AS codigofornecedor,
             ISNULL(CONVERT(VARCHAR(200), dp.fornecedor), '') AS fornecedor,
-            CONVERT(VARCHAR(30), dp.valorpagamento)     AS valorpagamento,
+            CONVERT(VARCHAR(30), dp.valoremissao)       AS valorpagamento,
             CONVERT(VARCHAR(10), dp.dataemissao, 120)   AS dataemissao,
             CONVERT(VARCHAR(10), dp.datavencto,  120)   AS datavencto,
-            CONVERT(VARCHAR(10), dp.datapagamento, 120) AS datapagamento,
-            ISNULL(CONVERT(VARCHAR(1), dp.liquidado), ' ') AS liquidado,
+            CONVERT(VARCHAR(10), dp.dataprevpagto, 120) AS datapagamento,
+            CONVERT(VARCHAR(1),  dp.status)             AS liquidado,
             ISNULL(CONVERT(VARCHAR(100), dp.tipodocumento), '') AS tipodocumento,
-            ISNULL(CONVERT(VARCHAR(500), dp.historico), '')     AS historico
+            ISNULL(CONVERT(VARCHAR(200), dp.tipodespesa), '')   AS historico,
+            ISNULL(CONVERT(VARCHAR(100), dp.centrocusto), '')   AS centrocusto
         FROM docpag dp
         WHERE dp.datavencto >= DATEADD(day, -%(janela_dias)s, GETDATE())
-        ORDER BY dp.numpagamento
+        ORDER BY dp.recnum
     """
     logger.info("[BI] Buscando docpag (últimos %d dias) ...", janela_dias)
     conn = _get_conn()
