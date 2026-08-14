@@ -442,3 +442,68 @@ def fetch_bi_carteira_valor() -> list[dict]:
         raise
     finally:
         conn.close()
+
+
+def fetch_bi_carteira_equipamentos() -> list[dict]:
+    """
+    Retorna carteira de contratos com uma linha por equipamento.
+    Inclui: contrato, cliente, equipamento, produto, valor_unitario,
+    data_movimento (envio), setor (tabela de preco), grupo.
+    Usado para calcular backlog por equipamento no portal.
+    """
+    sql = """
+        WITH last_move AS (
+            SELECT
+                CONVERT(VARCHAR(20), equipamento)        AS equipamento,
+                CONVERT(VARCHAR(20), contrato)           AS contrato,
+                CONVERT(VARCHAR(1),  envret)             AS envret,
+                ISNULL(CONVERT(VARCHAR(500), setor), '') AS setor,
+                CONVERT(VARCHAR(10), data, 120)          AS data_movimento,
+                ROW_NUMBER() OVER (
+                    PARTITION BY equipamento
+                    ORDER BY data DESC, seq DESC
+                ) AS rn
+            FROM ctmequip
+        )
+        SELECT
+            lm.contrato                                          AS numero_contrato,
+            c.cliente                                            AS cliente_codigo,
+            (SELECT TOP 1 d.cliente FROM docrec d
+             WHERE d.codigocliente = c.cliente
+             ORDER BY d.recnum DESC)                             AS cliente_nome,
+            CONVERT(VARCHAR(20), e.codigo)                       AS equip_codigo,
+            ISNULL(CONVERT(VARCHAR(500), e.produto), '')         AS produto_descricao,
+            ISNULL(CONVERT(VARCHAR(200), p.grupo_descricao), '') AS grupo,
+            lm.setor,
+            lm.data_movimento,
+            ISNULL(CONVERT(DECIMAL(18,2), cp.valorunitario), 0) AS valor_unitario,
+            CONVERT(VARCHAR(10), c.datavigini, 120)              AS data_inicio,
+            CONVERT(VARCHAR(10), c.datavigfim, 120)              AS data_fim
+        FROM last_move lm
+        JOIN equip e ON CONVERT(VARCHAR(20), e.codigo) = lm.equipamento
+        JOIN contract c ON c.codigo = lm.contrato
+        LEFT JOIN produtos p ON p.codigo = e.codigoproduto
+        LEFT JOIN ctprod cp ON CONVERT(VARCHAR(20), cp.contrato) = lm.contrato
+                           AND cp.produto = e.codigoproduto
+                           AND ISNULL(CONVERT(VARCHAR(500), cp.setor), '') = lm.setor
+        WHERE lm.rn = 1
+          AND lm.envret = 'E'
+          AND c.situacao = '3'
+          AND ISNULL(CONVERT(VARCHAR(50), e.situacao), '') NOT LIKE '%INATIV%'
+        ORDER BY lm.contrato, lm.equipamento
+    """
+    logger.info("[BI] Buscando carteira por equipamento ...")
+    conn = _get_conn()
+    try:
+        cur = conn.cursor(as_dict=True)
+        cur.execute(sql)
+        rows = cur.fetchall()
+        result = [{k: float(v) if hasattr(v, "__round__") and not isinstance(v, int) else v
+                   for k, v in dict(r).items()} for r in rows]
+        logger.info("[BI] Carteira por equipamento: %d registros.", len(result))
+        return result
+    except Exception as e:
+        logger.error("[BI] Erro ao buscar carteira por equipamento: %s", e)
+        raise
+    finally:
+        conn.close()

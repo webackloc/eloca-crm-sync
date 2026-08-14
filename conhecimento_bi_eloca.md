@@ -347,3 +347,29 @@ pip install pymssql
 
 5. **Acesso ao BI apenas do GitHub Actions** — para qualquer consulta ao BI,
    criar um workflow com `workflow_dispatch` e rodar via Actions.
+
+---
+
+## 9. Cálculo de Backlog (validado ago/2026)
+
+### Fontes
+- Prazo em meses: contracts.period_months do WebackOne (144 contratos)
+- Data de primeira entrega: bi_movimentacoes MIN(data) WHERE envret=E por equipamento
+- Valor mensal por equipamento: bi_ctprod.valorunitario via join por (contrato, produto, setor)
+
+### Lógica
+- meses_em_campo = meses desde data_primeira_entrega ate hoje
+- meses_restantes = MAX(0, period_months - meses_em_campo)
+- backlog_item = valorunitario x MAX(1, meses_restantes) — vencido vale 1 mes
+- Equipamentos sem historico de envio: fallback para data_ultimo_mov de bi_ativos
+
+### Resultados validados
+- Contrato 51 (K2, 36m): R$ 3.033.867 vs R$ 3.203.543 Eloca (diff 5,3%)
+- MRR total: R$ 1,66 MM (7.463 equipamentos)
+- Backlog total: R$ 27,30 MM
+- Renovacao mensal: R$ 420K (equipamentos vencidos ainda em campo)
+
+### Views e tabelas no WebackOne
+- contracts: period_months por contrato (144 linhas, leitura liberada)
+- bi_movimentacoes: historico envret E/R (13.457 envios, leitura liberada)
+- vw_primeira_entrega: MIN(data) envret=E por equipamento (fallback)
