@@ -348,7 +348,7 @@ def fetch_bi_contas_pagar(janela_dias: int = 120) -> list[dict]:
             CONVERT(VARCHAR(10), dp.dataemissao, 120)   AS dataemissao,
             CONVERT(VARCHAR(10), dp.datavencto,  120)   AS datavencto,
             CONVERT(VARCHAR(10), dp.dataprevpagto, 120) AS datapagamento,
-            CONVERT(VARCHAR(1),  dp.status)             AS liquidado,
+            CASE WHEN dp.numbordero > 0 THEN 'S' ELSE 'N' END AS liquidado,
             ISNULL(CONVERT(VARCHAR(100), dp.tipodocumento), '') AS tipodocumento,
             ISNULL(CONVERT(VARCHAR(200), dp.tipodespesa), '')   AS historico,
             ISNULL(CONVERT(VARCHAR(100), dp.centrocusto), '')   AS centrocusto
