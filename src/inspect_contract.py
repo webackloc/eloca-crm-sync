@@ -7,23 +7,25 @@ conn = pymssql.connect(
 )
 cur = conn.cursor(as_dict=True)
 
-print("=== Distribuição de status em docpag ===")
+print("=== dataprevpagto vs datavencto — quantos tem data de pagamento? ===")
 cur.execute("""
-    SELECT status, COUNT(*) AS qtd, SUM(valoremissao) AS valor_total
+    SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN dataprevpagto IS NOT NULL AND dataprevpagto <= GETDATE() THEN 1 ELSE 0 END) AS com_pagamento_realizado,
+        SUM(CASE WHEN dataprevpagto IS NULL THEN 1 ELSE 0 END) AS sem_data_pagamento
     FROM docpag
     WHERE datavencto >= DATEADD(day, -120, GETDATE())
-    GROUP BY status
-    ORDER BY status
 """)
-for r in cur.fetchall():
-    print(dict(r))
+print(dict(cur.fetchone()))
 
-print("\n=== Exemplo de registro pago (status != 0) ===")
+print("\n=== Existe campo datapagamento (diferente de dataprevpagto)? ===")
 cur.execute("""
-    SELECT TOP 3 numfatura, status, valoremissao, datavencto, dataprevpagto
+    SELECT TOP 3
+        numfatura, datavencto, dataprevpagto,
+        valoremissao, status, numbordero
     FROM docpag
-    WHERE status != 0
-    AND datavencto >= DATEADD(day, -120, GETDATE())
+    WHERE datavencto < GETDATE()
+    AND datavencto >= DATEADD(day, -30, GETDATE())
     ORDER BY recnum DESC
 """)
 for r in cur.fetchall():
