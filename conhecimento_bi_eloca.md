@@ -373,3 +373,18 @@ pip install pymssql
 - contracts: period_months por contrato (144 linhas, leitura liberada)
 - bi_movimentacoes: historico envret E/R (13.457 envios, leitura liberada)
 - vw_primeira_entrega: MIN(data) envret=E por equipamento (fallback)
+
+---
+
+## 10. Contas a Pagar — docpag (validado ago/2026)
+
+### Indicador de pagamento
+- Campo `status` sempre = 0 — não indica pagamento
+- Campo `numbordero > 0` = título pago (incluído em borderô)
+- Mapeamento no sync: numbordero > 0 → liquidado = 'S', caso contrário 'N'
+
+### DRE de Caixa no portal
+- Pago no mês: bi_contas_pagar WHERE liquidado='S' e datavencto no mês
+- A pagar no mês: bi_contas_pagar WHERE liquidado='N' e datavencto no mês
+- Compromissos futuros: vw_pagar_aberto (próximos 90 dias)
+- Recebido: bi_faturamento WHERE liquidado='S' e datavencto no mês
