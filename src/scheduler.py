@@ -217,6 +217,17 @@ async def executar_sincronizacao():
         logger.error(msg)
         erros.append(msg)
 
+    # Propaga status do ELOCA (ativos) → assets.asset_status do CRM nativo
+    try:
+        res = supabase.rpc("sync_assets_status_from_ativos").execute()
+        info = res.data or {}
+        logger.info(
+            "sync_assets_status_from_ativos: avaliados=%s atualizados=%s por_status=%s",
+            info.get("avaliados"), info.get("atualizados"), info.get("por_status")
+        )
+    except Exception as e:
+        logger.warning("Erro em sync_assets_status_from_ativos: %s", e)
+
     # ── 2. Obtém token ELOCA (para ativos e OS via REST/CGI) ─────────────────
     try:
         token_data = await obter_token()
