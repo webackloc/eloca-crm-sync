@@ -164,7 +164,15 @@ async def executar_sincronizacao():
 
     erros = []
     ativos_total = os_total = carteira_total = 0
-    supabase = get_client()
+
+    try:
+        supabase = get_client()
+    except Exception as e:
+        logger.error(
+            "Falha ao criar cliente Supabase (%s) — operações que dependem do "
+            "banco Supabase serão ignoradas; sync BI via bi-ingest continua.", e
+        )
+        supabase = None
 
     log_id = _log_inicio(supabase, inicio)
 
