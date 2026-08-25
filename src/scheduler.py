@@ -46,6 +46,40 @@ SYNC_CRON    = os.getenv("SYNC_CRON",    "0,30 8-18 * * 1-5")
 SYNC_TZ      = os.getenv("SYNC_TZ",      "America/Sao_Paulo")
 RUN_ON_START = os.getenv("RUN_ON_START", "true").lower() == "true"
 
+# ── bi-ingest Edge Function ───────────────────────────────────────────────────
+BI_SYNC_TOKEN = os.getenv("BI_SYNC_TOKEN", "")
+BI_INGEST_URL = "https://dxkbqxualiqdhvsudshr.supabase.co/functions/v1/bi-ingest"
+
+
+def _bi_ingest_post(table: str, rows: list[dict]) -> int:
+    """Envia um lote de linhas para a Edge Function bi-ingest.
+
+    Substitui as chamadas RPC sync_bi_* que retornavam 401 quando o
+    SUPABASE_SERVICE_KEY não estava disponível no runner do GitHub Actions.
+    O BI_SYNC_TOKEN é um secret dedicado, independente do service key.
+
+    Retorna o número de linhas reportado pelo endpoint (ou len(rows) como fallback).
+    """
+    if not BI_SYNC_TOKEN:
+        raise RuntimeError(
+            "BI_SYNC_TOKEN não definido — adicione o secret no GitHub Actions."
+        )
+    import httpx as _httpx
+    resp = _httpx.post(
+        f"{BI_INGEST_URL}?table={table}",
+        headers={
+            "x-sync-token": BI_SYNC_TOKEN,
+            "Content-Type": "application/json",
+        },
+        json={"rows": rows},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    try:
+        return resp.json().get("count", len(rows))
+    except Exception:
+        return len(rows)
+
 
 def _get_sync_state(supabase, tabela: str) -> int:
     """Retorna o último recnum sincronizado para a tabela via RPC."""
@@ -514,52 +548,49 @@ def update_ativos_contratos_bi(supabase, equipamentos: list[dict]):
 
 
 def sync_bi_movimentacoes(supabase, movs: list[dict]):
-    """Upsert de ctmequip na tabela bi_movimentacoes via RPC."""
+    """Upsert de ctmequip na tabela bi_movimentacoes via bi-ingest Edge Function."""
     if not movs:
         return
     from supabase_sync import _chunks
     total = 0
     for lote in _chunks(movs, 500):
         try:
-            res = supabase.rpc("sync_bi_movimentacoes", {"p_data": lote}).execute()
-            total += res.data or 0
+            total += _bi_ingest_post("bi_movimentacoes", lote)
         except Exception as e:
             logger.warning("Erro em sync_bi_movimentacoes (lote %d): %s", len(lote), e)
     logger.info("sync_bi_movimentacoes: %d/%d registros inseridos/atualizados.", total, len(movs))
 
 
 def sync_bi_ctprod(supabase, ctprod: list[dict]):
-    """Upsert de ctprod na tabela bi_ctprod via RPC."""
+    """Upsert de ctprod na tabela bi_ctprod via bi-ingest Edge Function."""
     if not ctprod:
         return
     from supabase_sync import _chunks
     total = 0
     for lote in _chunks(ctprod, 500):
         try:
-            res = supabase.rpc("sync_bi_ctprod", {"p_data": lote}).execute()
-            total += res.data or 0
+            total += _bi_ingest_post("bi_ctprod", lote)
         except Exception as e:
             logger.warning("Erro em sync_bi_ctprod (lote %d): %s", len(lote), e)
     logger.info("sync_bi_ctprod: %d/%d registros inseridos/atualizados.", total, len(ctprod))
 
 
 def sync_bi_faturamento(supabase, faturamento: list[dict]):
-    """Upsert de docrec na tabela bi_faturamento via RPC."""
+    """Upsert de docrec na tabela bi_faturamento via bi-ingest Edge Function."""
     if not faturamento:
         return
     from supabase_sync import _chunks
     total = 0
     for lote in _chunks(faturamento, 500):
         try:
-            res = supabase.rpc("sync_bi_faturamento", {"p_data": lote}).execute()
-            total += res.data or 0
+            total += _bi_ingest_post("bi_faturamento", lote)
         except Exception as e:
             logger.warning("Erro em sync_bi_faturamento (lote %d): %s", len(lote), e)
     logger.info("sync_bi_faturamento: %d/%d registros inseridos/atualizados.", total, len(faturamento))
 
 
 def sync_bi_ativos(supabase, ativos: list[dict]):
-    """Upsert do catálogo de equipamentos na tabela bi_ativos via RPC.
+    """Upsert do catálogo de equipamentos na tabela bi_ativos via bi-ingest Edge Function.
 
     Cada registro traz:
       - Dados do equipamento (equip): codigo, produto, serial, situacao
@@ -571,15 +602,14 @@ def sync_bi_ativos(supabase, ativos: list[dict]):
         return
     from supabase_sync import _chunks
     total = 0
-    # Serializar o campo boolean para string (RPC espera JSON)
+    # Normalizar boolean → bool nativo (bi-ingest aceita JSON padrão)
     payload = [
-        {**a, 'inconsistente': str(a.get('inconsistente', False)).lower()}
+        {**a, 'inconsistente': bool(a.get('inconsistente', False))}
         for a in ativos
     ]
     for lote in _chunks(payload, 500):
         try:
-            res = supabase.rpc("sync_bi_ativos", {"p_data": lote}).execute()
-            total += res.data or 0
+            total += _bi_ingest_post("bi_ativos", lote)
         except Exception as e:
             logger.warning("Erro em sync_bi_ativos (lote %d): %s", len(lote), e)
     inconsistentes = sum(1 for a in ativos if a.get('inconsistente'))
@@ -670,30 +700,28 @@ if __name__ == "__main__":
 
 
 def sync_bi_contas_pagar(supabase, contas_pagar: list[dict]):
-    """Upsert de docpag na tabela bi_contas_pagar via RPC."""
+    """Upsert de docpag na tabela bi_contas_pagar via bi-ingest Edge Function."""
     if not contas_pagar:
         return
     from supabase_sync import _chunks
     total = 0
     for lote in _chunks(contas_pagar, 500):
         try:
-            res = supabase.rpc("sync_bi_contas_pagar", {"p_data": lote}).execute()
-            total += res.data or 0
+            total += _bi_ingest_post("bi_contas_pagar", lote)
         except Exception as e:
             logger.warning("Erro em sync_bi_contas_pagar (lote %d): %s", len(lote), e)
     logger.info("sync_bi_contas_pagar: %d/%d registros.", total, len(contas_pagar))
 
 
 def sync_bi_carteira_valor(supabase, carteira: list[dict]):
-    """Upsert da carteira com valor mensal real via RPC."""
+    """Upsert da carteira com valor mensal real via bi-ingest Edge Function."""
     if not carteira:
         return
     from supabase_sync import _chunks
     total = 0
     for lote in _chunks(carteira, 500):
         try:
-            res = supabase.rpc("sync_bi_carteira_valor", {"p_data": lote}).execute()
-            total += res.data or 0
+            total += _bi_ingest_post("bi_carteira_valor", lote)
         except Exception as e:
             logger.warning("Erro em sync_bi_carteira_valor (lote %d): %s", len(lote), e)
     logger.info("sync_bi_carteira_valor: %d/%d contratos.", total, len(carteira))

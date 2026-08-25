@@ -62,6 +62,9 @@ jobs:
           TWOCAPTCHA_API_KEY: ${{ secrets.TWOCAPTCHA_API_KEY }}
           PROXY_URL:        ${{ secrets.PROXY_URL }}
 
+          # bi-ingest Edge Function
+          BI_SYNC_TOKEN: ${{ secrets.BI_SYNC_TOKEN }}
+
           # URLs fixas
           API_BASE:     https://api.otimogestor.com.br
           CGI_BASE:     https://weback.app.otimogestor.com.br/cgi-bin/exec.cgi
