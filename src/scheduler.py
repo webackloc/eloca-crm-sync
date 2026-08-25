@@ -50,6 +50,37 @@ RUN_ON_START = os.getenv("RUN_ON_START", "true").lower() == "true"
 BI_SYNC_TOKEN = os.getenv("BI_SYNC_TOKEN", "")
 BI_INGEST_URL = "https://dxkbqxualiqdhvsudshr.supabase.co/functions/v1/bi-ingest"
 
+# ── crm-sync Edge Function ────────────────────────────────────────────────────
+CRM_SYNC_TOKEN = os.getenv("CRM_SYNC_TOKEN", "")
+CRM_SYNC_URL   = "https://dxkbqxualiqdhvsudshr.supabase.co/functions/v1/crm-sync"
+
+
+def _crm_sync_post(action: str, body: dict | None = None) -> dict:
+    """Chama a Edge Function crm-sync com a action indicada.
+
+    Substitui todas as chamadas supabase.rpc() que precisavam do
+    SUPABASE_SERVICE_KEY no runner do GitHub Actions. A Edge Function
+    executa as RPCs internamente com a service role do projeto.
+
+    Retorna o JSON da resposta ou lança RuntimeError em caso de falha.
+    """
+    if not CRM_SYNC_TOKEN:
+        raise RuntimeError(
+            "CRM_SYNC_TOKEN não definido — adicione o secret no GitHub Actions."
+        )
+    import httpx as _httpx
+    resp = _httpx.post(
+        f"{CRM_SYNC_URL}?action={action}",
+        headers={
+            "x-sync-token": CRM_SYNC_TOKEN,
+            "Content-Type": "application/json",
+        },
+        json=body or {},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
 
 def _bi_ingest_post(table: str, rows: list[dict]) -> int:
     """Envia um lote de linhas para a Edge Function bi-ingest.
@@ -82,29 +113,29 @@ def _bi_ingest_post(table: str, rows: list[dict]) -> int:
 
 
 def _get_sync_state(supabase, tabela: str) -> int:
-    """Retorna o último recnum sincronizado para a tabela via RPC."""
+    """Retorna o último recnum sincronizado para a tabela via crm-sync Edge Function."""
     try:
-        res = supabase.rpc("get_sync_state", {"p_tabela": tabela}).execute()
-        return int(res.data or 0)
+        data = _crm_sync_post("get_sync_state", {"tabela": tabela})
+        return int(data.get("recnum") or 0)
     except Exception as e:
         logger.warning("Não foi possível ler sync_state para %s: %s", tabela, e)
         return 0
 
 
 def _update_sync_state(supabase, tabela: str, recnum: int) -> None:
-    """Grava o último recnum sincronizado para a tabela via RPC."""
+    """Grava o último recnum sincronizado para a tabela via crm-sync Edge Function."""
     try:
-        supabase.rpc("update_sync_state", {"p_tabela": tabela, "p_recnum": recnum}).execute()
+        _crm_sync_post("update_sync_state", {"tabela": tabela, "recnum": recnum})
         logger.info("sync_state atualizado: %s → recnum %d", tabela, recnum)
     except Exception as e:
         logger.warning("Não foi possível atualizar sync_state para %s: %s", tabela, e)
 
 
 def _log_inicio(supabase, inicio: datetime) -> "int | None":
-    """Insere linha de início na tabela sync_logs via RPC e retorna o id gerado."""
+    """Insere linha de início na tabela sync_logs via crm-sync Edge Function."""
     try:
-        res = supabase.rpc("log_sync_inicio", {}).execute()
-        return res.data if res.data else None
+        data = _crm_sync_post("log_inicio")
+        return data.get("log_id")
     except Exception as e:
         logger.warning("Não foi possível registrar início no sync_logs: %s", e)
         return None
@@ -113,22 +144,22 @@ def _log_inicio(supabase, inicio: datetime) -> "int | None":
 def _log_fim(supabase, log_id, inicio: datetime,
              ativos_total: int, os_total: int, carteira_total: int,
              erros: list[str]):
-    """Atualiza a linha de log com o resultado final do ciclo via RPC."""
+    """Atualiza a linha de log com o resultado final do ciclo via crm-sync Edge Function."""
     if log_id is None:
         return
     try:
         concluido = datetime.utcnow()
         duracao   = round((concluido - inicio).total_seconds(), 1)
         status    = "erro" if len(erros) == 3 else ("parcial" if erros else "sucesso")
-        supabase.rpc("log_sync_fim", {
-            "p_log_id":         log_id,
-            "p_ativos_total":   ativos_total,
-            "p_os_total":       os_total,
-            "p_carteira_total": carteira_total,
-            "p_erros":          erros or None,
-            "p_duracao":        duracao,
-            "p_status":         status,
-        }).execute()
+        _crm_sync_post("log_fim", {
+            "log_id":         log_id,
+            "ativos_total":   ativos_total,
+            "os_total":       os_total,
+            "carteira_total": carteira_total,
+            "erros":          erros or None,
+            "duracao":        duracao,
+            "status":         status,
+        })
     except Exception as e:
         logger.warning("Não foi possível atualizar sync_logs (id=%s): %s", log_id, e)
 
@@ -261,8 +292,7 @@ async def executar_sincronizacao():
 
     # Propaga status do ELOCA (ativos) → assets.asset_status do CRM nativo
     try:
-        res = supabase.rpc("sync_assets_status_from_ativos").execute()
-        info = res.data or {}
+        info = _crm_sync_post("sync_assets_status")
         logger.info(
             "sync_assets_status_from_ativos: avaliados=%s atualizados=%s por_status=%s",
             info.get("avaliados"), info.get("atualizados"), info.get("por_status")
@@ -418,9 +448,14 @@ def upsert_os_supabase(supabase, os_list):
     if not registros:
         return
     from supabase_sync import _chunks
+    total = 0
     for lote in _chunks(registros, 500):
-        supabase.rpc("sync_ordens_servico", {"p_data": lote}).execute()
-    logger.info("Upsert de %d OS concluído via RPC.", len(registros))
+        try:
+            r = _crm_sync_post("sync_ordens_servico", {"rows": lote})
+            total += r.get("count", len(lote))
+        except Exception as e:
+            logger.warning("Erro em sync_ordens_servico (lote %d): %s", len(lote), e)
+    logger.info("Upsert de %d/%d OS via crm-sync.", total, len(registros))
 
 
 def upsert_carteira_supabase(supabase, carteira: list[dict]):
@@ -448,19 +483,14 @@ def upsert_carteira_supabase(supabase, carteira: list[dict]):
         return
 
     from supabase_sync import _chunks
+    total = 0
     for lote in _chunks(registros, 500):
-        supabase.rpc("sync_carteira_contratos", {"p_data": lote}).execute()
-    logger.info("Upsert de %d contratos na carteira_contratos concluído via RPC.", len(registros))
-
-    # Remove contratos que não estão mais ativos no BI
-    try:
-        ids_ativos = [r["id"] for r in registros]
-        res = supabase.rpc("cleanup_carteira_contratos", {"p_ids": ids_ativos}).execute()
-        removidos = res.data or 0
-        if removidos:
-            logger.info("Cleanup: %d contrato(s) removido(s) da carteira (não mais ativos no BI).", removidos)
-    except Exception as e:
-        logger.warning("Erro no cleanup da carteira_contratos: %s", e)
+        try:
+            r = _crm_sync_post("sync_carteira", {"rows": lote})
+            total += r.get("count", len(lote))
+        except Exception as e:
+            logger.warning("Erro em sync_carteira (lote %d): %s", len(lote), e)
+    logger.info("Upsert de %d/%d contratos na carteira_contratos via crm-sync.", total, len(registros))
 
 
 def sync_contracts_native(supabase, carteira: list[dict]):
@@ -485,8 +515,8 @@ def sync_contracts_native(supabase, carteira: list[dict]):
     total = 0
     for lote in _chunks(registros, 20):
         try:
-            res = supabase.rpc("sync_contracts_native", {"p_data": lote}).execute()
-            total += res.data or 0
+            r = _crm_sync_post("sync_contracts_native", {"rows": lote})
+            total += r.get("count", len(lote))
         except Exception as e:
             logger.warning("Erro em sync_contracts_native (lote %d): %s", len(lote), e)
     logger.info("sync_contracts_native: %d contrato(s) atualizados no CRM nativo.", total)
@@ -513,8 +543,8 @@ def sync_assets_contract_native(supabase, equipamentos: list[dict]):
     total = 0
     for lote in _chunks(registros, 500):
         try:
-            res = supabase.rpc("sync_assets_contract_native", {"p_data": lote}).execute()
-            total += res.data or 0
+            r = _crm_sync_post("sync_assets_contract_native", {"rows": lote})
+            total += r.get("count", len(lote))
         except Exception as e:
             logger.warning("Erro em sync_assets_contract_native (lote %d): %s", len(lote), e)
     logger.info("sync_assets_contract_native: %d ativo(s) vinculados ao contrato no CRM nativo.", total)
@@ -547,12 +577,12 @@ def update_ativos_contratos_bi(supabase, equipamentos: list[dict]):
     total = 0
     for lote in _chunks(registros, 500):
         try:
-            supabase.rpc("sync_ativos_contratos", {"p_data": lote}).execute()
-            total += len(lote)
+            r = _crm_sync_post("sync_ativos_contratos", {"rows": lote})
+            total += r.get("count", len(lote))
         except Exception as e:
             logger.warning("Erro ao atualizar ativos via RPC (lote %d): %s", len(lote), e)
 
-    logger.info("Ativos atualizados com contrato/cliente via BI RPC: %d", total)
+    logger.info("Ativos atualizados com contrato/cliente via crm-sync: %d", total)
 
 
 def sync_bi_movimentacoes(supabase, movs: list[dict]):
