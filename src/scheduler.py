@@ -333,7 +333,8 @@ async def executar_sincronizacao():
 
         # ── 4. Criação de OS (fila do CRM → ELOCA) ────────────────────────────
         try:
-            pendentes = buscar_os_pendentes_criacao(supabase)
+            resp = _crm_sync_post("fila_os_pendentes")
+            pendentes = resp.get("items", [])
             logger.info("%d OS pendente(s) de criação.", len(pendentes))
 
             if pendentes:
@@ -668,7 +669,7 @@ async def processar_fila_criacao_os(pendentes: list[dict], supabase, api_token: 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http:
         for item in pendentes:
             fila_id = item["id"]
-            marcar_os_processando(supabase, fila_id)
+            _crm_sync_post("fila_os_processando", {"id": fila_id})
 
             try:
                 # Monta o POST para criar a OS via CGI
@@ -698,11 +699,11 @@ async def processar_fila_criacao_os(pendentes: list[dict], supabase, api_token: 
                 if m:
                     numero_os = m.group(1)
 
-                marcar_os_criada(supabase, fila_id, numero_os)
+                _crm_sync_post("fila_os_criada", {"id": fila_id, "numero_os": numero_os})
                 logger.info("OS criada: %s (fila_id=%s)", numero_os, fila_id)
 
             except Exception as e:
-                marcar_os_erro(supabase, fila_id, str(e))
+                _crm_sync_post("fila_os_erro", {"id": fila_id, "erro": str(e)})
                 logger.error("Erro ao criar OS (fila_id=%s): %s", fila_id, e)
 
 
