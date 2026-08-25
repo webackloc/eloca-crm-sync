@@ -1,0 +1,91 @@
+name: Consulta BI Pontual
+
+on:
+  workflow_dispatch:
+    inputs:
+      codigo_equip:
+        description: 'Código do equipamento (ex: 8087)'
+        required: true
+        default: '8087'
+
+jobs:
+  consulta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependências do sistema (FreeTDS)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends freetds-dev freetds-bin
+
+      - name: Instalar pymssql
+        run: pip install pymssql
+
+      - name: Consultar equipamento no BI
+        env:
+          BI_HOST:     ${{ secrets.BI_HOST }}
+          BI_PORT:     ${{ secrets.BI_PORT }}
+          BI_DATABASE: ${{ secrets.BI_DATABASE }}
+          BI_USER:     ${{ secrets.BI_USER }}
+          BI_PASSWORD: ${{ secrets.BI_PASSWORD }}
+          CODIGO:      ${{ github.event.inputs.codigo_equip }}
+        run: |
+          python3 - <<'EOF'
+          import pymssql, os
+
+          codigo = os.environ['CODIGO']
+          conn = pymssql.connect(
+              server=os.environ['BI_HOST'],
+              port=int(os.environ.get('BI_PORT', 1433)),
+              user=os.environ['BI_USER'],
+              password=os.environ['BI_PASSWORD'],
+              database=os.environ['BI_DATABASE'],
+              timeout=30,
+              charset='UTF-8',
+          )
+          cur = conn.cursor(as_dict=True)
+
+          print(f"\n=== equip (situação atual) ===")
+          cur.execute("""
+              SELECT CONVERT(VARCHAR(20), e.codigo) AS codigo,
+                     e.codigoproduto, e.produto, e.seriefabricante,
+                     e.situacao,
+                     CONVERT(VARCHAR(10), e.created_at, 120) AS atualizado
+              FROM equip e
+              WHERE CONVERT(VARCHAR(20), e.codigo) = %s
+          """, (codigo,))
+          rows = cur.fetchall()
+          if rows:
+              for r in rows: print(dict(r))
+          else:
+              print(f"  CÓDIGO {codigo} NÃO ENCONTRADO em equip")
+
+          print(f"\n=== ctmequip (últimas 5 movimentações) ===")
+          cur.execute("""
+              SELECT TOP 5
+                     CONVERT(VARCHAR(20), equipamento) AS equipamento,
+                     CONVERT(VARCHAR(20), contrato)    AS contrato,
+                     CONVERT(VARCHAR(1),  envret)      AS envret,
+                     CONVERT(VARCHAR(10), data, 120)   AS data_mov,
+                     seq, numos
+              FROM ctmequip
+              WHERE CONVERT(VARCHAR(20), equipamento) = %s
+              ORDER BY data DESC, seq DESC
+          """, (codigo,))
+          rows = cur.fetchall()
+          if rows:
+              for r in rows: print(dict(r))
+          else:
+              print(f"  Nenhuma movimentação encontrada para {codigo}")
+
+          conn.close()
+          EOF
