@@ -23,8 +23,13 @@ Driver:   pymssql (requer freetds-dev no Linux)
 ```
 Project URL: https://dxkbqxualiqdhvsudshr.supabase.co
 ```
-> O projeto é gerenciado pelo Lovable. Acesso direto às tabelas via dashboard
-> é bloqueado. Todas as escritas são feitas via funções SECURITY DEFINER (RPC).
+> ⚠️ **REGRA INVIOLÁVEL**: O Supabase é 100% gerenciado pelo Lovable.
+> NUNCA gerar SQL para rodar direto no Supabase SQL Editor.
+> NUNCA pedir ao usuário para acessar o dashboard do Supabase manualmente.
+> TUDO que envolve Supabase (migrations, tabelas, Edge Functions, RLS, views, RPCs)
+> é feito via **prompt para o Lovable**, que aplica internamente.
+> O mesmo vale para a Edge Function bi-ingest: qualquer nova tabela que o scheduler
+> precise ingerir deve ser adicionada via prompt ao Lovable para ele atualizar a função.
 
 ### GitHub Actions
 ```
@@ -376,7 +381,25 @@ pip install pymssql
 
 ---
 
-## 10. Contas a Pagar — docpag (validado ago/2026)
+## 10. Cancelamento de títulos — docrec e docpag
+
+### Campo status em docrec (contas a receber)
+| Valor | Significado |
+|---|---|
+| `'0'` | Título normal (ativo) |
+| `'1'` | **CANCELADO** — ignorar em totais e DRE |
+
+> Validado set/2026: apenas 3 títulos cancelados no histórico (R$ 897,00, fev/2026).
+> Esses títulos aparecem com `liquidado=' '` (em aberto) mas NÃO devem entrar em cálculos.
+> **Regra**: sempre filtrar `WHERE status != '1'` ou `WHERE status = '0'` em consultas financeiras.
+
+### Campo status em docpag (contas a pagar)
+- Sempre `'0'` no histórico — não há cancelamento mapeado via status.
+- Pagamento indicado por `numbordero > 0` (liquidado='S' no sync).
+
+---
+
+## 11. Contas a Pagar — docpag (validado ago/2026)
 
 ### Indicador de pagamento
 - Campo `status` sempre = 0 — não indica pagamento
@@ -388,3 +411,80 @@ pip install pymssql
 - A pagar no mês: bi_contas_pagar WHERE liquidado='N' e datavencto no mês
 - Compromissos futuros: vw_pagar_aberto (próximos 90 dias)
 - Recebido: bi_faturamento WHERE liquidado='S' e datavencto no mês
+
+---
+
+## 11. Sincronização de Status — assets × ELOCA (ago/2026)
+
+### Problema resolvido
+O sync nunca atualizava `assets.asset_status`. Quando equipamentos retornavam de clientes, o `ativos.status` era atualizado pela API, mas `assets` permanecia "Alugado" indefinidamente. Após 20 dias os contadores divergiram: CRM 70 DT vs ELOCA 68, CRM 173 NB vs ELOCA 150, CRM 6 SM vs ELOCA 1.
+
+### Causa raiz
+Equipamentos inativados no ELOCA deixam de ser devolvidos pela API. A tabela `ativos` no Supabase ficava congelada com o último status conhecido (ex: "Em OS - Com Contrato"), e a função de sync reaplicava esse status velho a cada ciclo — impedindo a inativação correta no CRM.
+
+### Solução implementada
+**Função `sync_assets_status_from_ativos`** (Supabase, SECURITY DEFINER):
+- Roda a cada ciclo de 15 min via `scheduler.py`
+- Propaga `ativos.status` → `assets.asset_status` para todos os equipamentos
+- Preserva estados exclusivos do CRM: `Em trânsito (envio)` e `Reservado`
+
+**Inativação automática com dupla confirmação** (segura, sem intervenção humana):
+- Condição 1: `ativos.updated_at < now() - interval '2 days'` → API ELOCA parou de devolver o item
+- Condição 2: `bi_ativos.situacao ILIKE '%inativ%'` com `bi_ativos.synced_at > now() - interval '2 hours'` → BI (atualizado a cada 15 min) confirma inativo
+- Aplica **somente** em `asset_status = 'Em estoque'` — nunca toca em Alugado, Em coleta, Em manutenção etc.
+- Quando as duas fontes concordam: inativa automaticamente no próximo ciclo
+
+**JSON de retorno por ciclo:**
+```json
+{
+  "avaliados": N,
+  "atualizados": N,
+  "inativados_automaticamente": N,
+  "candidatos_sem_confirmacao_bi": N,
+  "inativacao_bloqueada_bi_parado": N,
+  "bi_ultima_sincronizacao": "timestamp"
+}
+```
+
+### Inativação manual cirúrgica
+Para inativar equipamentos específicos já confirmados no ELOCA:
+```sql
+SELECT inativar_ativos_especificos(
+  ARRAY['codigo1', 'codigo2', ...]::text[]
+);
+```
+
+### Lição aprendida
+**Nunca usar inativação automática baseada em apenas uma fonte.** O critério de "2 dias sem atualização" sozinho inativou 761 equipamentos em massa (erro). A dupla confirmação (API parada + BI confirmando) é o único critério seguro.
+
+### BI atualiza a cada 15 minutos
+Diferente do que se assumia antes, o BI SQL Server **não** tem lag de 24h — atualiza a cada 15 minutos. Isso torna a confirmação via `bi_ativos` quase em tempo real.
+
+---
+
+## 12. Incidente e Correções — 25/ago/2026
+
+### Problema resolvido: contadores CRM ≠ ELOCA
+Após análise cruzada entre a lista completa de disponíveis no ELOCA e os registros "Em estoque" no CRM, identificados e corrigidos:
+- **Desktops:** 2 inativos (`7010`, `A211846`) — CRM 70 → 68 ✓
+- **Notebooks:** 19 inativos — CRM 173 → 150 ✓
+- **Smartphones:** 5 inativos (`A275528`, `A275532`, `A275543`, `A275557`, `A275566`) — CRM 6 → 1 ✓
+
+Todos tinham `último_mov = R` (retorno de contrato) e estavam congelados na tabela `ativos` — o ELOCA os inativou e parou de devolvê-los na API, mas o CRM mantinha o status velho.
+
+### Funções criadas/ajustadas
+- `inativar_ativos_especificos(p_codigos text[], p_dry_run boolean default false)` — inativação cirúrgica por lista explícita de códigos
+- `sync_assets_status_from_ativos` — atualizada com inativação automática por dupla confirmação (ver seção 11)
+
+### Erro de permissão pós-alterações (corrigido)
+Após as alterações do Lovable, várias funções perderam o GRANT. Sintomas no log:
+- `HTTP 401 — permission denied for function` → faltava GRANT para service_role
+- `HTTP 400 — column "recnum" does not exist` → funções recriadas sem o campo recnum
+
+Funções afetadas e corrigidas: `sync_bi_movimentacoes`, `sync_bi_ctprod`, `sync_assets_status_from_ativos`, `sync_bi_faturamento`, `sync_bi_carteira_valor`, `sync_bi_ativos`, `update_sync_state`.
+
+**Regra:** toda vez que o Lovable recriar uma função Supabase, verificar se o GRANT foi mantido. Padrão obrigatório:
+```sql
+GRANT EXECUTE ON FUNCTION <nome> TO service_role, authenticated;
+```
+Nunca conceder a `anon` (chave visível no bundle do app).

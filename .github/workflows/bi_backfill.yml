@@ -64,23 +64,33 @@ jobs:
                   result.append(d)
               return result
 
-          def ingest(table, rows, chunk=500):
+          def ingest(table, rows, chunk=200):
               if not rows:
                   print(f"  {table}: 0 registros, pulando.")
                   return
               total = 0
+              erros = 0
               for i in range(0, len(rows), chunk):
                   lote = rows[i:i+chunk]
-                  resp = httpx.post(
-                      f"{BI_INGEST_URL}?table={table}",
-                      headers={"x-sync-token": BI_SYNC_TOKEN, "Content-Type": "application/json"},
-                      json={"rows": lote},
-                      timeout=120,
-                  )
-                  resp.raise_for_status()
-                  total += len(lote)
-                  print(f"  {table}: {total}/{len(rows)} enviados...")
-              print(f"  ✅ {table}: {total}/{len(rows)} concluído.")
+                  try:
+                      resp = httpx.post(
+                          f"{BI_INGEST_URL}?table={table}",
+                          headers={"x-sync-token": BI_SYNC_TOKEN, "Content-Type": "application/json"},
+                          json={"rows": lote},
+                          timeout=120,
+                      )
+                      if resp.status_code >= 400:
+                          print(f"  ⚠️  {table} lote {i}-{i+len(lote)}: HTTP {resp.status_code}")
+                          print(f"      Resposta: {resp.text[:500]}")
+                          erros += 1
+                      else:
+                          total += len(lote)
+                  except Exception as e:
+                      print(f"  ❌ {table} lote {i}-{i+len(lote)}: {e}")
+                      erros += 1
+                  if (i // chunk) % 5 == 0:
+                      print(f"  {table}: {total}/{len(rows)} enviados...")
+              print(f"  {'✅' if erros == 0 else '⚠️ '} {table}: {total}/{len(rows)} concluído. Erros: {erros}")
 
           conn = get_conn()
           cur  = conn.cursor(as_dict=True)
