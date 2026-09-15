@@ -1,7 +1,8 @@
 """
 eloca_bi.py — Leitura do banco BI SQL Server da ELOCA (AWS RDS)
 Database: biweback
-Tabelas: contract, ctmequip, ctprod, docpag, docrec, produtos
+Tabelas: contract, ctmequip, ctprod, docpag, docrec, produtos,
+         dbaicp (baixas CP), dbaicr (baixas CR), rreceitr (tipo receita)
 
 Atualizado diariamente pelo ELOCA (~lag de 24h).
 """
@@ -171,22 +172,29 @@ def fetch_bi_faturamento(janela_dias: int = 90) -> list[dict]:
     Padrão: 90 dias (~3 meses de histórico vivo).
 
     Colunas: numfatura, numsequencia, contrato, codigocliente, cliente,
-             valoremissao, dataemissao, datavencto, liquidado, tipodocumento,
-             representante, representante_nome
+             valoremissao, dataemissao, datavencto, dataprevpagto,
+             datavenctoutil, liquidado, tipodocumento, tiporeceita_descricao,
+             valorretido, valissretido, status_doc, representante, representante_nome
     """
     sql = """
         SELECT
-            CONVERT(VARCHAR(30), d.numfatura)     AS numfatura,
-            CONVERT(VARCHAR(10), d.numsequencia)  AS numsequencia,
+            CONVERT(VARCHAR(30), d.numfatura)        AS numfatura,
+            CONVERT(VARCHAR(10), d.numsequencia)     AS numsequencia,
             NULLIF(LTRIM(RTRIM(ISNULL(CONVERT(VARCHAR(20), d.contrato), ''))), '') AS contrato,
-            CONVERT(VARCHAR(20), d.codigocliente) AS codigocliente,
+            CONVERT(VARCHAR(20), d.codigocliente)    AS codigocliente,
             ISNULL(CONVERT(VARCHAR(200), d.cliente), '') AS cliente,
-            CONVERT(VARCHAR(30), d.valoremissao)  AS valoremissao,
-            CONVERT(VARCHAR(10), d.dataemissao, 120) AS dataemissao,
-            CONVERT(VARCHAR(10), d.datavencto,  120) AS datavencto,
-            ISNULL(CONVERT(VARCHAR(1), d.liquidado), ' ') AS liquidado,
+            CONVERT(VARCHAR(30), d.valoremissao)     AS valoremissao,
+            CONVERT(VARCHAR(10), d.dataemissao,  120) AS dataemissao,
+            CONVERT(VARCHAR(10), d.datavencto,   120) AS datavencto,
+            CONVERT(VARCHAR(10), d.dataprevpagto,120) AS dataprevpagto,
+            CONVERT(VARCHAR(10), d.datavenctoutil,120) AS datavenctoutil,
+            ISNULL(CONVERT(VARCHAR(1),   d.liquidado),   ' ') AS liquidado,
             ISNULL(CONVERT(VARCHAR(100), d.tipodocumento), '') AS tipodocumento,
-            ISNULL(CONVERT(VARCHAR(20), c.representante), '') AS representante,
+            ISNULL(CONVERT(VARCHAR(100), d.tiporeceita_descricao), '') AS tiporeceita_descricao,
+            ISNULL(d.valorretido,  0) AS valorretido,
+            ISNULL(d.valissretido, 0) AS valissretido,
+            ISNULL(CONVERT(VARCHAR(1), d.status), '') AS status_doc,
+            ISNULL(CONVERT(VARCHAR(20),  c.representante), '') AS representante,
             ISNULL(CONVERT(VARCHAR(200), c.representante_nome), '') AS representante_nome
         FROM docrec d
         LEFT JOIN contract c ON c.codigo = d.contrato
@@ -215,10 +223,12 @@ def fetch_bi_ativos() -> list[dict]:
       - Dados do produto (grupo_descricao, grupo2_descricao via join produtos)
       - Posição atual (contrato + envret via último movimento de ctmequip)
       - Flag de inconsistência quando situacao × envret divergem
+      - Campos novos: marca, modelo, valcompra, dataaquisicao
 
     Colunas: codigo, codigoproduto, produto_descricao, serial_fabricante,
              situacao, tipo_equipamento, subtipo_equipamento,
              contrato_atual, ultimo_envret, data_ultimo_mov,
+             marca, modelo, valcompra, dataaquisicao,
              inconsistente, bi_updated_at
     """
     sql = """
@@ -245,6 +255,10 @@ def fetch_bi_ativos() -> list[dict]:
             ISNULL(lm.contrato, '')                                 AS contrato_atual,
             ISNULL(lm.envret,   '')                                 AS ultimo_envret,
             ISNULL(lm.data_mov, '')                                 AS data_ultimo_mov,
+            ISNULL(CONVERT(VARCHAR(50),  e.marca), '')              AS marca,
+            ISNULL(CONVERT(VARCHAR(100), e.modelo), '')             AS modelo,
+            ISNULL(e.valcompra, 0)                                  AS valcompra,
+            CONVERT(VARCHAR(10), e.dataaquisicao, 120)              AS dataaquisicao,
             CONVERT(VARCHAR(19), e.created_at, 120)                 AS bi_updated_at
         FROM equip e
         LEFT JOIN produtos p  ON p.codigo  = e.codigoproduto
@@ -337,17 +351,18 @@ def fetch_equipamentos_ativos() -> list[dict]:
 def fetch_bi_contas_pagar(janela_dias: int = 120) -> list[dict]:
     sql = """
         SELECT
-            CONVERT(VARCHAR(30), dp.numfatura)          AS numfatura,
-            CONVERT(VARCHAR(30), dp.recnum)             AS recnum,
+            CONVERT(VARCHAR(30), dp.numfatura)           AS numfatura,
+            CONVERT(VARCHAR(30), dp.recnum)              AS recnum,
             NULLIF(LTRIM(RTRIM(
                 ISNULL(CONVERT(VARCHAR(20), dp.contrato), '')
-            )), '')                                      AS contrato,
-            CONVERT(VARCHAR(20), dp.codigofornecedor)   AS codigofornecedor,
+            )), '')                                       AS contrato,
+            CONVERT(VARCHAR(20), dp.codigofornecedor)    AS codigofornecedor,
             ISNULL(CONVERT(VARCHAR(200), dp.fornecedor), '') AS fornecedor,
-            CONVERT(VARCHAR(30), dp.valoremissao)       AS valorpagamento,
-            CONVERT(VARCHAR(10), dp.dataemissao, 120)   AS dataemissao,
-            CONVERT(VARCHAR(10), dp.datavencto,  120)   AS datavencto,
-            CONVERT(VARCHAR(10), dp.dataprevpagto, 120) AS datapagamento,
+            CONVERT(VARCHAR(30), dp.valoremissao)        AS valorpagamento,
+            CONVERT(VARCHAR(10), dp.dataemissao,   120)  AS dataemissao,
+            CONVERT(VARCHAR(10), dp.datavencto,    120)  AS datavencto,
+            CONVERT(VARCHAR(10), dp.datavenctoutil,120)  AS datavenctoutil,
+            CONVERT(VARCHAR(10), dp.dataprevpagto, 120)  AS datapagamento,
             CASE WHEN dp.numbordero > 0 THEN 'S' ELSE 'N' END AS liquidado,
             ISNULL(CONVERT(VARCHAR(100), dp.tipodocumento), '') AS tipodocumento,
             ISNULL(CONVERT(VARCHAR(200), dp.tipodespesa), '')   AS historico,
@@ -439,6 +454,147 @@ def fetch_bi_carteira_valor() -> list[dict]:
         return result
     except Exception as e:
         logger.error("[BI] Erro ao buscar carteira com valor: %s", e)
+        raise
+    finally:
+        conn.close()
+
+
+def fetch_bi_baixas_pagar(janela_dias: int = 120) -> list[dict]:
+    """
+    Retorna baixas (pagamentos efetivos) de contas a pagar (dbaicp).
+    Janela deslizante de N dias baseada em datapagamento.
+
+    Liga a bi_contas_pagar via (numfatura, numsequencia).
+
+    Colunas: recnum, numfatura, numsequencia, codigofornecedor, fornecedor,
+             banco, agencia, contacorrente, valorpago, valordesconto,
+             valorabatimento, valorjuros, valormulta,
+             datapagamento, databaixa, tipobaixa, observacao
+    """
+    sql = """
+        SELECT
+            CONVERT(VARCHAR(30), b.recnum)             AS recnum,
+            CONVERT(VARCHAR(30), b.numfatura)          AS numfatura,
+            CONVERT(VARCHAR(10), b.numsequencia)       AS numsequencia,
+            CONVERT(VARCHAR(20), b.codigofornecedor)   AS codigofornecedor,
+            ISNULL(CONVERT(VARCHAR(200), b.fornecedor), '') AS fornecedor,
+            CONVERT(VARCHAR(10), b.banco)              AS banco,
+            CONVERT(VARCHAR(10), b.agencia)            AS agencia,
+            ISNULL(CONVERT(VARCHAR(30), b.contacorrente), '') AS contacorrente,
+            ISNULL(b.valorpago,       0)               AS valorpago,
+            ISNULL(b.valordesconto,   0)               AS valordesconto,
+            ISNULL(b.valorabatimento, 0)               AS valorabatimento,
+            ISNULL(b.valorjuros,      0)               AS valorjuros,
+            ISNULL(b.valormulta,      0)               AS valormulta,
+            CONVERT(VARCHAR(10), b.datapagamento, 120) AS datapagamento,
+            CONVERT(VARCHAR(10), b.databaixa,     120) AS databaixa,
+            ISNULL(CONVERT(VARCHAR(100), b.tipobaixa), '')   AS tipobaixa,
+            ISNULL(CONVERT(VARCHAR(200), b.observacao), '')  AS observacao
+        FROM dbaicp b
+        WHERE b.datapagamento >= DATEADD(day, -%(janela_dias)s, GETDATE())
+        ORDER BY b.recnum
+    """
+    logger.info("[BI] Buscando dbaicp — baixas CP (últimos %d dias) ...", janela_dias)
+    conn = _get_conn()
+    try:
+        cur = conn.cursor(as_dict=True)
+        cur.execute(sql, {"janela_dias": janela_dias})
+        rows = cur.fetchall()
+        result = [{k: float(v) if hasattr(v, "__round__") and not isinstance(v, int) else v for k, v in dict(r).items()} for r in rows]
+        logger.info("[BI] dbaicp: %d baixas.", len(result))
+        return result
+    except Exception as e:
+        logger.error("[BI] Erro ao buscar dbaicp: %s", e)
+        raise
+    finally:
+        conn.close()
+
+
+def fetch_bi_baixas_receber(janela_dias: int = 90) -> list[dict]:
+    """
+    Retorna baixas (recebimentos efetivos) de contas a receber (dbaicr).
+    Janela deslizante de N dias baseada em datacredito.
+
+    Liga a bi_faturamento via (numfatura, numsequencia).
+
+    Colunas: recnum, numfatura, numsequencia, banco, agencia, contacorrente,
+             valorpago, valordesconto, valorabatimento, valorjuros, valormulta,
+             datapagamento, databaixa, datacredito, tipobaixa, observacao
+    """
+    sql = """
+        SELECT
+            CONVERT(VARCHAR(30), b.recnum)             AS recnum,
+            CONVERT(VARCHAR(30), b.numfatura)          AS numfatura,
+            CONVERT(VARCHAR(10), b.numsequencia)       AS numsequencia,
+            CONVERT(VARCHAR(10), b.banco)              AS banco,
+            CONVERT(VARCHAR(10), b.agencia)            AS agencia,
+            ISNULL(CONVERT(VARCHAR(30), b.contacorrente), '') AS contacorrente,
+            ISNULL(b.valorpago,       0)               AS valorpago,
+            ISNULL(b.valordesconto,   0)               AS valordesconto,
+            ISNULL(b.valorabatimento, 0)               AS valorabatimento,
+            ISNULL(b.valorjuros,      0)               AS valorjuros,
+            ISNULL(b.valormulta,      0)               AS valormulta,
+            CONVERT(VARCHAR(10), b.datapagamento, 120) AS datapagamento,
+            CONVERT(VARCHAR(10), b.databaixa,     120) AS databaixa,
+            CONVERT(VARCHAR(10), b.datacredito,   120) AS datacredito,
+            ISNULL(CONVERT(VARCHAR(100), b.tipobaixa), '')   AS tipobaixa,
+            ISNULL(CONVERT(VARCHAR(200), b.observacao), '')  AS observacao
+        FROM dbaicr b
+        WHERE b.datacredito >= DATEADD(day, -%(janela_dias)s, GETDATE())
+           OR b.datapagamento >= DATEADD(day, -%(janela_dias)s, GETDATE())
+        ORDER BY b.recnum
+    """
+    logger.info("[BI] Buscando dbaicr — baixas CR (últimos %d dias) ...", janela_dias)
+    conn = _get_conn()
+    try:
+        cur = conn.cursor(as_dict=True)
+        cur.execute(sql, {"janela_dias": janela_dias})
+        rows = cur.fetchall()
+        result = [{k: float(v) if hasattr(v, "__round__") and not isinstance(v, int) else v for k, v in dict(r).items()} for r in rows]
+        logger.info("[BI] dbaicr: %d recebimentos.", len(result))
+        return result
+    except Exception as e:
+        logger.error("[BI] Erro ao buscar dbaicr: %s", e)
+        raise
+    finally:
+        conn.close()
+
+
+def fetch_bi_tipo_receita(janela_dias: int = 90) -> list[dict]:
+    """
+    Retorna classificação de receita por fatura (rreceitr).
+    Janela deslizante sincronizada com bi_faturamento.
+
+    Liga a bi_faturamento via (numfatura, numsequencia).
+
+    Colunas: recnum, numfatura, numsequencia, codigotiporeceita,
+             tiporeceita, percentual
+    """
+    sql = """
+        SELECT
+            CONVERT(VARCHAR(30), r.recnum)             AS recnum,
+            CONVERT(VARCHAR(30), r.numfatura)          AS numfatura,
+            CONVERT(VARCHAR(10), r.numsequencia)       AS numsequencia,
+            ISNULL(CONVERT(VARCHAR(10),  r.codigotiporeceita), '') AS codigotiporeceita,
+            ISNULL(CONVERT(VARCHAR(100), r.tiporeceita), '')       AS tiporeceita,
+            ISNULL(r.percentual, 0)                    AS percentual
+        FROM rreceitr r
+        JOIN docrec d ON d.numfatura    = r.numfatura
+                     AND d.numsequencia = r.numsequencia
+        WHERE d.dataemissao >= DATEADD(day, -%(janela_dias)s, GETDATE())
+        ORDER BY r.recnum
+    """
+    logger.info("[BI] Buscando rreceitr — tipo receita (últimos %d dias) ...", janela_dias)
+    conn = _get_conn()
+    try:
+        cur = conn.cursor(as_dict=True)
+        cur.execute(sql, {"janela_dias": janela_dias})
+        rows = cur.fetchall()
+        result = [{k: float(v) if hasattr(v, "__round__") and not isinstance(v, int) else v for k, v in dict(r).items()} for r in rows]
+        logger.info("[BI] rreceitr: %d registros.", len(result))
+        return result
+    except Exception as e:
+        logger.error("[BI] Erro ao buscar rreceitr: %s", e)
         raise
     finally:
         conn.close()

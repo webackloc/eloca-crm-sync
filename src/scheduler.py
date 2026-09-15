@@ -23,6 +23,7 @@ from eloca_bi   import (
     fetch_carteira_contratos, fetch_equipamentos_ativos,
     fetch_bi_movimentacoes, fetch_bi_ctprod, fetch_bi_faturamento,
     fetch_bi_ativos, fetch_bi_contas_pagar, fetch_bi_carteira_valor,
+    fetch_bi_baixas_pagar, fetch_bi_baixas_receber, fetch_bi_tipo_receita,
 )
 from supabase_sync import (
     get_client,
@@ -270,6 +271,33 @@ async def executar_sincronizacao():
         sync_bi_contas_pagar(supabase, contas_pagar)
     except Exception as e:
         msg = f"Erro ao sincronizar docpag: {e}"
+        logger.error(msg)
+        erros.append(msg)
+
+    # Baixas de contas a pagar (dbaicp) — pagamentos efetivos
+    try:
+        baixas_pagar = fetch_bi_baixas_pagar(janela_dias=120)
+        sync_bi_baixas_pagar(supabase, baixas_pagar)
+    except Exception as e:
+        msg = f"Erro ao sincronizar dbaicp (baixas CP): {e}"
+        logger.error(msg)
+        erros.append(msg)
+
+    # Faturamento (docrec) — já sincronizado acima; agora as baixas de CR
+    try:
+        baixas_receber = fetch_bi_baixas_receber(janela_dias=90)
+        sync_bi_baixas_receber(supabase, baixas_receber)
+    except Exception as e:
+        msg = f"Erro ao sincronizar dbaicr (baixas CR): {e}"
+        logger.error(msg)
+        erros.append(msg)
+
+    # Tipo de receita por fatura (rreceitr)
+    try:
+        tipo_receita = fetch_bi_tipo_receita(janela_dias=90)
+        sync_bi_tipo_receita(supabase, tipo_receita)
+    except Exception as e:
+        msg = f"Erro ao sincronizar rreceitr (tipo receita): {e}"
         logger.error(msg)
         erros.append(msg)
 
@@ -750,6 +778,48 @@ def sync_bi_contas_pagar(supabase, contas_pagar: list[dict]):
         except Exception as e:
             logger.warning("Erro em sync_bi_contas_pagar (lote %d): %s", len(lote), e)
     logger.info("sync_bi_contas_pagar: %d/%d registros.", total, len(contas_pagar))
+
+
+def sync_bi_baixas_pagar(supabase, baixas: list[dict]):
+    """Upsert de dbaicp na tabela bi_baixas_pagar via bi-ingest Edge Function."""
+    if not baixas:
+        return
+    from supabase_sync import _chunks
+    total = 0
+    for lote in _chunks(baixas, 500):
+        try:
+            total += _bi_ingest_post("bi_baixas_pagar", lote)
+        except Exception as e:
+            logger.warning("Erro em sync_bi_baixas_pagar (lote %d): %s", len(lote), e)
+    logger.info("sync_bi_baixas_pagar: %d/%d baixas CP.", total, len(baixas))
+
+
+def sync_bi_baixas_receber(supabase, baixas: list[dict]):
+    """Upsert de dbaicr na tabela bi_baixas_receber via bi-ingest Edge Function."""
+    if not baixas:
+        return
+    from supabase_sync import _chunks
+    total = 0
+    for lote in _chunks(baixas, 500):
+        try:
+            total += _bi_ingest_post("bi_baixas_receber", lote)
+        except Exception as e:
+            logger.warning("Erro em sync_bi_baixas_receber (lote %d): %s", len(lote), e)
+    logger.info("sync_bi_baixas_receber: %d/%d recebimentos CR.", total, len(baixas))
+
+
+def sync_bi_tipo_receita(supabase, registros: list[dict]):
+    """Upsert de rreceitr na tabela bi_tipo_receita via bi-ingest Edge Function."""
+    if not registros:
+        return
+    from supabase_sync import _chunks
+    total = 0
+    for lote in _chunks(registros, 500):
+        try:
+            total += _bi_ingest_post("bi_tipo_receita", lote)
+        except Exception as e:
+            logger.warning("Erro em sync_bi_tipo_receita (lote %d): %s", len(lote), e)
+    logger.info("sync_bi_tipo_receita: %d/%d tipos de receita.", total, len(registros))
 
 
 def sync_bi_carteira_valor(supabase, carteira: list[dict]):
