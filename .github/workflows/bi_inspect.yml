@@ -1,0 +1,127 @@
+name: BI — Inspeção Completa
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar dependências do sistema
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends freetds-dev freetds-bin
+
+      - name: Instalar pymssql
+        run: pip install pymssql --break-system-packages
+
+      - name: Inspecionar BI
+        env:
+          BI_HOST:     ${{ secrets.BI_HOST }}
+          BI_PORT:     ${{ secrets.BI_PORT }}
+          BI_DATABASE: ${{ secrets.BI_DATABASE }}
+          BI_USER:     ${{ secrets.BI_USER }}
+          BI_PASSWORD: ${{ secrets.BI_PASSWORD }}
+        run: |
+          python3 - <<'EOF'
+          import os, pymssql
+
+          conn = pymssql.connect(
+              server=os.environ["BI_HOST"],
+              port=int(os.environ.get("BI_PORT", 1433)),
+              database=os.environ["BI_DATABASE"],
+              user=os.environ["BI_USER"],
+              password=os.environ["BI_PASSWORD"],
+              timeout=60,
+              charset="UTF-8",
+          )
+          cur = conn.cursor(as_dict=True)
+
+          # ── 1. Todas as tabelas com contagem de linhas ─────────────────────
+          cur.execute("""
+              SELECT
+                  t.TABLE_NAME,
+                  p.rows AS row_count
+              FROM INFORMATION_SCHEMA.TABLES t
+              LEFT JOIN sys.tables st ON st.name = t.TABLE_NAME
+              LEFT JOIN sys.partitions p ON p.object_id = st.object_id AND p.index_id IN (0,1)
+              WHERE t.TABLE_TYPE = 'BASE TABLE'
+              GROUP BY t.TABLE_NAME, p.rows
+              ORDER BY p.rows DESC, t.TABLE_NAME
+          """)
+          tabelas = cur.fetchall()
+
+          print("\n" + "="*70)
+          print("  TABELAS NO BANCO BI")
+          print("="*70)
+          print(f"  {'TABELA':<35} {'LINHAS':>12}")
+          print(f"  {'-'*35} {'-'*12}")
+          for t in tabelas:
+              print(f"  {t['TABLE_NAME']:<35} {(t['row_count'] or 0):>12,}")
+
+          # ── 2. Colunas de cada tabela ──────────────────────────────────────
+          cur.execute("""
+              SELECT
+                  TABLE_NAME,
+                  COLUMN_NAME,
+                  DATA_TYPE,
+                  CHARACTER_MAXIMUM_LENGTH,
+                  NUMERIC_PRECISION,
+                  NUMERIC_SCALE,
+                  IS_NULLABLE,
+                  ORDINAL_POSITION
+              FROM INFORMATION_SCHEMA.COLUMNS
+              ORDER BY TABLE_NAME, ORDINAL_POSITION
+          """)
+          colunas = cur.fetchall()
+
+          tabela_atual = None
+          for c in colunas:
+              if c['TABLE_NAME'] != tabela_atual:
+                  tabela_atual = c['TABLE_NAME']
+                  print(f"\n{'─'*70}")
+                  print(f"  {tabela_atual}")
+                  print(f"{'─'*70}")
+                  print(f"  {'#':<4} {'COLUNA':<35} {'TIPO':<25} {'NULL'}")
+                  print(f"  {'-'*4} {'-'*35} {'-'*25} {'-'*4}")
+
+              tipo = c['DATA_TYPE']
+              if c['CHARACTER_MAXIMUM_LENGTH']:
+                  tipo += f"({c['CHARACTER_MAXIMUM_LENGTH']})"
+              elif c['NUMERIC_PRECISION'] is not None:
+                  tipo += f"({c['NUMERIC_PRECISION']},{c['NUMERIC_SCALE']})"
+
+              nul = "YES" if c['IS_NULLABLE'] == 'YES' else "no"
+              print(f"  {c['ORDINAL_POSITION']:<4} {c['COLUMN_NAME']:<35} {tipo:<25} {nul}")
+
+          # ── 3. Amostra das tabelas que não conhecemos ainda ────────────────
+          tabelas_conhecidas = {
+              'contract', 'ctmequip', 'ctprod', 'docrec', 'docpag',
+              'equip', 'produtos'
+          }
+          novas = [t['TABLE_NAME'] for t in tabelas if t['TABLE_NAME'] not in tabelas_conhecidas]
+
+          if novas:
+              print(f"\n{'='*70}")
+              print("  TABELAS NOVAS (não conhecidas) — AMOSTRA 3 LINHAS")
+              print("="*70)
+              for nome in novas:
+                  try:
+                      cur.execute(f"SELECT TOP 3 * FROM [{nome}]")
+                      rows = cur.fetchall()
+                      print(f"\n  >> {nome}")
+                      for r in rows:
+                          for k, v in r.items():
+                              print(f"     {k}: {v}")
+                          print()
+                  except Exception as e:
+                      print(f"  >> {nome}: erro ao amostrar — {e}")
+
+          conn.close()
+          print("\n✅ Inspeção concluída.")
+          EOF
