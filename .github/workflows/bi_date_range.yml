@@ -1,0 +1,92 @@
+name: BI — Alcance de datas (baixas)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar dependências
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends freetds-dev freetds-bin
+          pip install pymssql --break-system-packages
+
+      - name: Consultar alcance de datas
+        env:
+          BI_HOST:     ${{ secrets.BI_HOST }}
+          BI_PORT:     ${{ secrets.BI_PORT }}
+          BI_DATABASE: ${{ secrets.BI_DATABASE }}
+          BI_USER:     ${{ secrets.BI_USER }}
+          BI_PASSWORD: ${{ secrets.BI_PASSWORD }}
+        run: |
+          python3 - <<'EOF'
+          import os, pymssql
+
+          conn = pymssql.connect(
+              server=os.environ["BI_HOST"],
+              port=int(os.environ.get("BI_PORT", 1433)),
+              database=os.environ["BI_DATABASE"],
+              user=os.environ["BI_USER"],
+              password=os.environ["BI_PASSWORD"],
+              timeout=30,
+          )
+          cur = conn.cursor(as_dict=True)
+
+          queries = {
+              "dbaicp (baixas CP)": """
+                  SELECT
+                      COUNT(*) AS total,
+                      MIN(datapagamento) AS mais_antiga,
+                      MAX(datapagamento) AS mais_recente,
+                      MIN(databaixa)     AS baixa_min,
+                      MAX(databaixa)     AS baixa_max
+                  FROM dbaicp
+                  WHERE datapagamento IS NOT NULL
+              """,
+              "dbaicr (baixas CR)": """
+                  SELECT
+                      COUNT(*) AS total,
+                      MIN(datapagamento) AS mais_antiga,
+                      MAX(datapagamento) AS mais_recente,
+                      MIN(datacredito)   AS credito_min,
+                      MAX(datacredito)   AS credito_max
+                  FROM dbaicr
+                  WHERE datapagamento IS NOT NULL
+              """,
+              "docrec (faturamento)": """
+                  SELECT
+                      COUNT(*) AS total,
+                      MIN(dataemissao) AS mais_antiga,
+                      MAX(dataemissao) AS mais_recente
+                  FROM docrec
+              """,
+              "docpag (contas a pagar)": """
+                  SELECT
+                      COUNT(*) AS total,
+                      MIN(dataemissao) AS mais_antiga,
+                      MAX(dataemissao) AS mais_recente
+                  FROM docpag
+              """,
+          }
+
+          print("\n" + "="*65)
+          print("  ALCANCE DE DATAS NO BI")
+          print("="*65)
+
+          for nome, sql in queries.items():
+              cur.execute(sql)
+              r = cur.fetchone()
+              print(f"\n  {nome}")
+              print(f"  {'─'*50}")
+              for k, v in r.items():
+                  print(f"    {k:<20} {v}")
+
+          conn.close()
+          EOF
