@@ -1,0 +1,281 @@
+name: BI — Backfill histórico completo (rodar UMA VEZ)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependências do sistema
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends freetds-dev freetds-bin
+
+      - name: Instalar dependências Python
+        run: pip install --no-cache-dir pymssql httpx
+
+      - name: Backfill histórico + análise de status/cancelamento
+        env:
+          BI_HOST:       ${{ secrets.BI_HOST }}
+          BI_PORT:       ${{ secrets.BI_PORT }}
+          BI_DATABASE:   ${{ secrets.BI_DATABASE }}
+          BI_USER:       ${{ secrets.BI_USER }}
+          BI_PASSWORD:   ${{ secrets.BI_PASSWORD }}
+          BI_SYNC_TOKEN: ${{ secrets.BI_SYNC_TOKEN }}
+        run: |
+          python3 - <<'EOF'
+          import os, decimal, httpx, pymssql
+
+          BI_INGEST_URL = "https://dxkbqxualiqdhvsudshr.supabase.co/functions/v1/bi-ingest"
+          BI_SYNC_TOKEN = os.environ["BI_SYNC_TOKEN"]
+
+          def get_conn():
+              return pymssql.connect(
+                  server=os.environ["BI_HOST"],
+                  port=int(os.environ.get("BI_PORT", 1433)),
+                  database=os.environ["BI_DATABASE"],
+                  user=os.environ["BI_USER"],
+                  password=os.environ["BI_PASSWORD"],
+                  timeout=120, charset="UTF-8",
+              )
+
+          def normalize(rows):
+              result = []
+              for r in rows:
+                  d = {}
+                  for k, v in dict(r).items():
+                      if isinstance(v, decimal.Decimal):
+                          d[k] = float(v)
+                      elif hasattr(v, 'isoformat'):
+                          d[k] = v.isoformat()
+                      else:
+                          d[k] = v
+                  result.append(d)
+              return result
+
+          def ingest(table, rows, chunk=500):
+              if not rows:
+                  print(f"  {table}: 0 registros, pulando.")
+                  return
+              total = 0
+              for i in range(0, len(rows), chunk):
+                  lote = rows[i:i+chunk]
+                  resp = httpx.post(
+                      f"{BI_INGEST_URL}?table={table}",
+                      headers={"x-sync-token": BI_SYNC_TOKEN, "Content-Type": "application/json"},
+                      json={"rows": lote},
+                      timeout=120,
+                  )
+                  resp.raise_for_status()
+                  total += len(lote)
+                  print(f"  {table}: {total}/{len(rows)} enviados...")
+              print(f"  ✅ {table}: {total}/{len(rows)} concluído.")
+
+          conn = get_conn()
+          cur  = conn.cursor(as_dict=True)
+
+          # ── 0. Análise de status/cancelamento ANTES do backfill ─────────────
+          print("\n" + "="*65)
+          print("  ANÁLISE: valores de status e campos de cancelamento")
+          print("="*65)
+
+          # docrec — status e liquidado
+          print("\n  docrec — combinações status × liquidado:")
+          cur.execute("""
+              SELECT
+                  ISNULL(CONVERT(VARCHAR(1), status), 'NULL')    AS status,
+                  ISNULL(CONVERT(VARCHAR(1), liquidado), 'NULL') AS liquidado,
+                  COUNT(*) AS qtd,
+                  SUM(valoremissao) AS valor_total
+              FROM docrec
+              GROUP BY status, liquidado
+              ORDER BY qtd DESC
+          """)
+          for r in cur.fetchall():
+              print(f"    status='{r['status']}' liquidado='{r['liquidado']}' → {r['qtd']} títulos  R$ {r['valor_total']:,.2f}")
+
+          # docpag — status e numbordero
+          print("\n  docpag — status × numbordero > 0 (pago):")
+          cur.execute("""
+              SELECT
+                  ISNULL(CONVERT(VARCHAR(2), status), 'NULL')   AS status,
+                  CASE WHEN numbordero > 0 THEN 'pago' ELSE 'aberto' END AS situacao,
+                  COUNT(*) AS qtd,
+                  SUM(valoremissao) AS valor_total
+              FROM docpag
+              GROUP BY status, CASE WHEN numbordero > 0 THEN 'pago' ELSE 'aberto' END
+              ORDER BY qtd DESC
+          """)
+          for r in cur.fetchall():
+              print(f"    status='{r['status']}' situacao='{r['situacao']}' → {r['qtd']} títulos  R$ {r['valor_total']:,.2f}")
+
+          # Totais por mês/ano para cruzar com portal
+          print("\n  docrec — faturamento por mês (todos os registros):")
+          cur.execute("""
+              SELECT
+                  FORMAT(dataemissao, 'yyyy-MM') AS mes,
+                  COUNT(*) AS qtd,
+                  SUM(valoremissao) AS valor_emitido,
+                  SUM(CASE WHEN liquidado = 'S' THEN valoremissao ELSE 0 END) AS valor_recebido,
+                  SUM(CASE WHEN liquidado != 'S' THEN valoremissao ELSE 0 END) AS valor_aberto
+              FROM docrec
+              GROUP BY FORMAT(dataemissao, 'yyyy-MM')
+              ORDER BY mes DESC
+          """)
+          print(f"    {'MÊS':<10} {'QTD':>5} {'EMITIDO':>14} {'RECEBIDO':>14} {'ABERTO':>14}")
+          print(f"    {'-'*10} {'-'*5} {'-'*14} {'-'*14} {'-'*14}")
+          for r in cur.fetchall():
+              print(f"    {r['mes']:<10} {r['qtd']:>5} {r['valor_emitido']:>14,.2f} {r['valor_recebido']:>14,.2f} {r['valor_aberto']:>14,.2f}")
+
+          # ── 1. Backfill bi_faturamento (docrec completo) ────────────────────
+          print("\n" + "="*65)
+          print("  BACKFILL: bi_faturamento (docrec completo)")
+          print("="*65)
+          cur.execute("""
+              SELECT
+                  CONVERT(VARCHAR(30), d.numfatura)          AS numfatura,
+                  CONVERT(VARCHAR(10), d.numsequencia)       AS numsequencia,
+                  NULLIF(LTRIM(RTRIM(ISNULL(CONVERT(VARCHAR(20), d.contrato), ''))), '') AS contrato,
+                  CONVERT(VARCHAR(20), d.codigocliente)      AS codigocliente,
+                  ISNULL(CONVERT(VARCHAR(200), d.cliente), '') AS cliente,
+                  ISNULL(d.valoremissao, 0)                  AS valoremissao,
+                  CONVERT(VARCHAR(10), d.dataemissao,   120) AS dataemissao,
+                  CONVERT(VARCHAR(10), d.datavencto,    120) AS datavencto,
+                  CONVERT(VARCHAR(10), d.dataprevpagto, 120) AS dataprevpagto,
+                  CONVERT(VARCHAR(10), d.datavenctoutil,120) AS datavenctoutil,
+                  ISNULL(CONVERT(VARCHAR(1), d.liquidado), ' ')  AS liquidado,
+                  ISNULL(CONVERT(VARCHAR(100), d.tipodocumento), '') AS tipodocumento,
+                  ISNULL(CONVERT(VARCHAR(100), d.tiporeceita_descricao), '') AS tiporeceita_descricao,
+                  ISNULL(d.valorretido,  0)                  AS valorretido,
+                  ISNULL(d.valissretido, 0)                  AS valissretido,
+                  ISNULL(CONVERT(VARCHAR(1), d.status), '')  AS status_doc,
+                  ISNULL(CONVERT(VARCHAR(20),  c.representante), '')      AS representante,
+                  ISNULL(CONVERT(VARCHAR(200), c.representante_nome), '') AS representante_nome
+              FROM docrec d
+              LEFT JOIN contract c ON c.codigo = d.contrato
+              ORDER BY d.numfatura
+          """)
+          rows = normalize(cur.fetchall())
+          print(f"  Total: {len(rows)} registros")
+          ingest("bi_faturamento", rows)
+
+          # ── 2. Backfill bi_contas_pagar (docpag completo) ───────────────────
+          print("\n" + "="*65)
+          print("  BACKFILL: bi_contas_pagar (docpag completo)")
+          print("="*65)
+          cur.execute("""
+              SELECT
+                  CONVERT(VARCHAR(30), dp.numfatura)           AS numfatura,
+                  CONVERT(VARCHAR(30), dp.recnum)              AS recnum,
+                  NULLIF(LTRIM(RTRIM(ISNULL(CONVERT(VARCHAR(20), dp.contrato), ''))), '') AS contrato,
+                  CONVERT(VARCHAR(20), dp.codigofornecedor)    AS codigofornecedor,
+                  ISNULL(CONVERT(VARCHAR(200), dp.fornecedor), '') AS fornecedor,
+                  ISNULL(dp.valoremissao, 0)                   AS valorpagamento,
+                  CONVERT(VARCHAR(10), dp.dataemissao,   120)  AS dataemissao,
+                  CONVERT(VARCHAR(10), dp.datavencto,    120)  AS datavencto,
+                  CONVERT(VARCHAR(10), dp.datavenctoutil,120)  AS datavenctoutil,
+                  CONVERT(VARCHAR(10), dp.dataprevpagto, 120)  AS datapagamento,
+                  CASE WHEN dp.numbordero > 0 THEN 'S' ELSE 'N' END AS liquidado,
+                  ISNULL(CONVERT(VARCHAR(100), dp.tipodocumento), '') AS tipodocumento,
+                  ISNULL(CONVERT(VARCHAR(200), dp.tipodespesa), '')   AS historico,
+                  ISNULL(CONVERT(VARCHAR(100), dp.centrocusto), '')   AS centrocusto,
+                  CONVERT(VARCHAR(10), dp.status)              AS status_doc
+              FROM docpag dp
+              ORDER BY dp.recnum
+          """)
+          rows = normalize(cur.fetchall())
+          print(f"  Total: {len(rows)} registros")
+          ingest("bi_contas_pagar", rows)
+
+          # ── 3. Backfill bi_baixas_pagar (dbaicp completo) ───────────────────
+          print("\n" + "="*65)
+          print("  BACKFILL: bi_baixas_pagar (dbaicp completo)")
+          print("="*65)
+          cur.execute("""
+              SELECT
+                  CONVERT(VARCHAR(30), b.recnum)             AS recnum,
+                  CONVERT(VARCHAR(30), b.numfatura)          AS numfatura,
+                  CONVERT(VARCHAR(10), b.numsequencia)       AS numsequencia,
+                  CONVERT(VARCHAR(20), b.codigofornecedor)   AS codigofornecedor,
+                  ISNULL(CONVERT(VARCHAR(200), b.fornecedor), '') AS fornecedor,
+                  CONVERT(VARCHAR(10), b.banco)              AS banco,
+                  CONVERT(VARCHAR(10), b.agencia)            AS agencia,
+                  ISNULL(CONVERT(VARCHAR(30), b.contacorrente), '') AS contacorrente,
+                  ISNULL(b.valorpago,       0) AS valorpago,
+                  ISNULL(b.valordesconto,   0) AS valordesconto,
+                  ISNULL(b.valorabatimento, 0) AS valorabatimento,
+                  ISNULL(b.valorjuros,      0) AS valorjuros,
+                  ISNULL(b.valormulta,      0) AS valormulta,
+                  CONVERT(VARCHAR(10), b.datapagamento, 120) AS datapagamento,
+                  CONVERT(VARCHAR(10), b.databaixa,     120) AS databaixa,
+                  ISNULL(CONVERT(VARCHAR(100), b.tipobaixa), '') AS tipobaixa,
+                  ISNULL(CONVERT(VARCHAR(200), b.observacao), '') AS observacao
+              FROM dbaicp b
+              ORDER BY b.recnum
+          """)
+          rows = normalize(cur.fetchall())
+          print(f"  Total: {len(rows)} registros")
+          ingest("bi_baixas_pagar", rows)
+
+          # ── 4. Backfill bi_baixas_receber (dbaicr completo) ─────────────────
+          print("\n" + "="*65)
+          print("  BACKFILL: bi_baixas_receber (dbaicr completo)")
+          print("="*65)
+          cur.execute("""
+              SELECT
+                  CONVERT(VARCHAR(30), b.recnum)             AS recnum,
+                  CONVERT(VARCHAR(30), b.numfatura)          AS numfatura,
+                  CONVERT(VARCHAR(10), b.numsequencia)       AS numsequencia,
+                  CONVERT(VARCHAR(10), b.banco)              AS banco,
+                  CONVERT(VARCHAR(10), b.agencia)            AS agencia,
+                  ISNULL(CONVERT(VARCHAR(30), b.contacorrente), '') AS contacorrente,
+                  ISNULL(b.valorpago,       0) AS valorpago,
+                  ISNULL(b.valordesconto,   0) AS valordesconto,
+                  ISNULL(b.valorabatimento, 0) AS valorabatimento,
+                  ISNULL(b.valorjuros,      0) AS valorjuros,
+                  ISNULL(b.valormulta,      0) AS valormulta,
+                  CONVERT(VARCHAR(10), b.datapagamento, 120) AS datapagamento,
+                  CONVERT(VARCHAR(10), b.databaixa,     120) AS databaixa,
+                  CONVERT(VARCHAR(10), b.datacredito,   120) AS datacredito,
+                  ISNULL(CONVERT(VARCHAR(100), b.tipobaixa), '') AS tipobaixa,
+                  ISNULL(CONVERT(VARCHAR(200), b.observacao), '') AS observacao
+              FROM dbaicr b
+              ORDER BY b.recnum
+          """)
+          rows = normalize(cur.fetchall())
+          print(f"  Total: {len(rows)} registros")
+          ingest("bi_baixas_receber", rows)
+
+          # ── 5. Backfill bi_tipo_receita (rreceitr completo) ─────────────────
+          print("\n" + "="*65)
+          print("  BACKFILL: bi_tipo_receita (rreceitr completo)")
+          print("="*65)
+          cur.execute("""
+              SELECT
+                  CONVERT(VARCHAR(30), r.recnum)       AS recnum,
+                  CONVERT(VARCHAR(30), r.numfatura)    AS numfatura,
+                  CONVERT(VARCHAR(10), r.numsequencia) AS numsequencia,
+                  ISNULL(CONVERT(VARCHAR(10),  r.codigotiporeceita), '') AS codigotiporeceita,
+                  ISNULL(CONVERT(VARCHAR(100), r.tiporeceita), '')       AS tiporeceita,
+                  ISNULL(r.percentual, 0) AS percentual
+              FROM rreceitr r
+              ORDER BY r.recnum
+          """)
+          rows = normalize(cur.fetchall())
+          print(f"  Total: {len(rows)} registros")
+          ingest("bi_tipo_receita", rows)
+
+          conn.close()
+          print("\n✅ Backfill histórico completo!")
+          EOF
