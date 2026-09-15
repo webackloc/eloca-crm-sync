@@ -1,0 +1,81 @@
+name: BI — Verificar títulos cancelados no Supabase
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Verificar status_doc cancelado no Supabase
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python3 - <<'EOF'
+          import os, urllib.request, json
+
+          SUPABASE_URL = "https://dxkbqxualiqdhvsudshr.supabase.co"
+          KEY = os.environ["SUPABASE_SERVICE_KEY"]
+          HEADERS = {
+              "apikey": KEY,
+              "Authorization": f"Bearer {KEY}",
+              "Content-Type": "application/json",
+          }
+
+          def rest_get(path):
+              req = urllib.request.Request(f"{SUPABASE_URL}/rest/v1/{path}", headers=HEADERS)
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.loads(r.read())
+
+          print("\n" + "="*65)
+          print("  VERIFICAÇÃO: títulos com status_doc = '1' (CANCELADO)")
+          print("="*65)
+
+          # 1. Quantos registros com status_doc = '1'
+          rows = rest_get("bi_faturamento?status_doc=eq.1&select=numfatura,numsequencia,cliente,valoremissao,dataemissao,status_doc,liquidado")
+          print(f"\n  Registros com status_doc = '1' no Supabase: {len(rows)}")
+          if rows:
+              print(f"\n  {'NUMFATURA':<15} {'SEQ':<5} {'CLIENTE':<35} {'VALOR':>12}  {'EMISSÃO'}")
+              print(f"  {'-'*15} {'-'*5} {'-'*35} {'-'*12}  {'-'*10}")
+              for r in rows:
+                  print(f"  {str(r.get('numfatura','')):<15} {str(r.get('numsequencia','')):<5} "
+                        f"{str(r.get('cliente',''))[:35]:<35} "
+                        f"{r.get('valoremissao',0):>12,.2f}  {r.get('dataemissao','')}")
+          else:
+              print("\n  ⚠️  Nenhum registro com status_doc='1' encontrado!")
+              print("     Possíveis causas:")
+              print("     1. Campo status_doc não foi populado corretamente")
+              print("     2. Os cancelados têm outro valor no campo")
+
+          # 2. Distribuição de status_doc (todos os valores)
+          print("\n" + "="*65)
+          print("  DISTRIBUIÇÃO: todos os valores de status_doc")
+          print("="*65)
+          rows_all = rest_get("bi_faturamento?select=status_doc&limit=10000")
+          contagem = {}
+          for r in rows_all:
+              v = r.get('status_doc') or 'NULL/vazio'
+              contagem[v] = contagem.get(v, 0) + 1
+          print(f"\n  Total de registros em bi_faturamento: {len(rows_all)}")
+          print(f"\n  {'STATUS_DOC':<20} {'QTD':>6}")
+          print(f"  {'-'*20} {'-'*6}")
+          for k, v in sorted(contagem.items(), key=lambda x: -x[1]):
+              print(f"  {str(k):<20} {v:>6}")
+
+          # 3. Amostra de registros recentes para confirmar que status_doc está gravado
+          print("\n" + "="*65)
+          print("  AMOSTRA: 5 registros recentes (status_doc deve estar preenchido)")
+          print("="*65)
+          amostra = rest_get("bi_faturamento?select=numfatura,numsequencia,dataemissao,valoremissao,status_doc,liquidado&order=dataemissao.desc&limit=5")
+          print(f"\n  {'NUMFATURA':<15} {'SEQ':<5} {'EMISSÃO':<12} {'VALOR':>12}  {'STATUS':<8} {'LIQ'}")
+          print(f"  {'-'*15} {'-'*5} {'-'*12} {'-'*12}  {'-'*8} {'-'*3}")
+          for r in amostra:
+              print(f"  {str(r.get('numfatura','')):<15} {str(r.get('numsequencia','')):<5} "
+                    f"{str(r.get('dataemissao','')):<12} "
+                    f"{r.get('valoremissao',0):>12,.2f}  "
+                    f"{str(r.get('status_doc') or '(null)'):<8} "
+                    f"{r.get('liquidado','')}")
+
+          EOF
