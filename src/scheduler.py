@@ -668,10 +668,15 @@ def sync_bi_ativos(supabase, ativos: list[dict]):
     if not ativos:
         return
     from supabase_sync import _chunks
+    import decimal
     total = 0
-    # Normalizar boolean → bool nativo (bi-ingest aceita JSON padrão)
+    # Normalizar tipos: bool para inconsistente, Decimal → float para campos numéricos
     payload = [
-        {**a, 'inconsistente': bool(a.get('inconsistente', False))}
+        {
+            k: (bool(v) if k == 'inconsistente' else
+                float(v) if isinstance(v, decimal.Decimal) else v)
+            for k, v in a.items()
+        }
         for a in ativos
     ]
     for lote in _chunks(payload, 500):
