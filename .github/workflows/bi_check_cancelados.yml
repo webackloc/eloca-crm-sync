@@ -9,73 +9,103 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Verificar status_doc cancelado no Supabase
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar dependências
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends freetds-dev freetds-bin
+          pip install pymssql httpx --break-system-packages
+
+      - name: Verificar status_doc cancelados
         env:
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BI_HOST:       ${{ secrets.BI_HOST }}
+          BI_PORT:       ${{ secrets.BI_PORT }}
+          BI_DATABASE:   ${{ secrets.BI_DATABASE }}
+          BI_USER:       ${{ secrets.BI_USER }}
+          BI_PASSWORD:   ${{ secrets.BI_PASSWORD }}
+          BI_SYNC_TOKEN: ${{ secrets.BI_SYNC_TOKEN }}
         run: |
           python3 - <<'EOF'
-          import os, urllib.request, json
+          import os, httpx, pymssql
 
-          SUPABASE_URL = "https://dxkbqxualiqdhvsudshr.supabase.co"
-          KEY = os.environ["SUPABASE_SERVICE_KEY"]
-          HEADERS = {
-              "apikey": KEY,
-              "Authorization": f"Bearer {KEY}",
-              "Content-Type": "application/json",
+          SUPABASE_URL  = "https://dxkbqxualiqdhvsudshr.supabase.co"
+          BI_SYNC_TOKEN = os.environ["BI_SYNC_TOKEN"]
+
+          # ── 1. Fonte: BI SQL Server — o que deveria ter sido enviado ────────
+          conn = pymssql.connect(
+              server=os.environ["BI_HOST"],
+              port=int(os.environ.get("BI_PORT", 1433)),
+              database=os.environ["BI_DATABASE"],
+              user=os.environ["BI_USER"],
+              password=os.environ["BI_PASSWORD"],
+              timeout=30, charset="UTF-8",
+          )
+          cur = conn.cursor(as_dict=True)
+
+          print("\n" + "="*65)
+          print("  FONTE BI: títulos com status='1' (CANCELADO) em docrec")
+          print("="*65)
+          cur.execute("""
+              SELECT
+                  CONVERT(VARCHAR(30), numfatura)    AS numfatura,
+                  CONVERT(VARCHAR(10), numsequencia) AS numsequencia,
+                  ISNULL(CONVERT(VARCHAR(200), cliente), '') AS cliente,
+                  ISNULL(valoremissao, 0)            AS valoremissao,
+                  CONVERT(VARCHAR(10), dataemissao, 120) AS dataemissao,
+                  CONVERT(VARCHAR(1), status)        AS status
+              FROM docrec
+              WHERE status = '1'
+          """)
+          bi_cancelados = cur.fetchall()
+          print(f"\n  Registros cancelados no BI: {len(bi_cancelados)}")
+          for r in bi_cancelados:
+              print(f"    numfatura={r['numfatura']} seq={r['numsequencia']} "
+                    f"valor={r['valoremissao']:,.2f} status={r['status']} "
+                    f"cliente={r['cliente'][:40]}")
+          conn.close()
+
+          # ── 2. Destino: Supabase via PostgREST ──────────────────────────────
+          print("\n" + "="*65)
+          print("  SUPABASE: status_doc no bi_faturamento")
+          print("="*65)
+
+          headers = {
+              "apikey": BI_SYNC_TOKEN,
+              "Authorization": f"Bearer {BI_SYNC_TOKEN}",
           }
 
-          def rest_get(path):
-              req = urllib.request.Request(f"{SUPABASE_URL}/rest/v1/{path}", headers=HEADERS)
-              with urllib.request.urlopen(req, timeout=30) as r:
-                  return json.loads(r.read())
+          # Distribuição de status_doc
+          resp = httpx.get(
+              f"{SUPABASE_URL}/rest/v1/bi_faturamento",
+              params={"select": "status_doc", "limit": "10000"},
+              headers=headers, timeout=30,
+          )
+          print(f"\n  HTTP status da consulta: {resp.status_code}")
 
-          print("\n" + "="*65)
-          print("  VERIFICAÇÃO: títulos com status_doc = '1' (CANCELADO)")
-          print("="*65)
-
-          # 1. Quantos registros com status_doc = '1'
-          rows = rest_get("bi_faturamento?status_doc=eq.1&select=numfatura,numsequencia,cliente,valoremissao,dataemissao,status_doc,liquidado")
-          print(f"\n  Registros com status_doc = '1' no Supabase: {len(rows)}")
-          if rows:
-              print(f"\n  {'NUMFATURA':<15} {'SEQ':<5} {'CLIENTE':<35} {'VALOR':>12}  {'EMISSÃO'}")
-              print(f"  {'-'*15} {'-'*5} {'-'*35} {'-'*12}  {'-'*10}")
+          if resp.status_code == 200:
+              rows = resp.json()
+              contagem = {}
               for r in rows:
-                  print(f"  {str(r.get('numfatura','')):<15} {str(r.get('numsequencia','')):<5} "
-                        f"{str(r.get('cliente',''))[:35]:<35} "
-                        f"{r.get('valoremissao',0):>12,.2f}  {r.get('dataemissao','')}")
+                  v = r.get("status_doc") or "(null/vazio)"
+                  contagem[v] = contagem.get(v, 0) + 1
+              print(f"  Total de registros em bi_faturamento: {len(rows)}")
+              print(f"\n  {'STATUS_DOC':<20} {'QTD':>6}")
+              print(f"  {'-'*20} {'-'*6}")
+              for k, v in sorted(contagem.items(), key=lambda x: -x[1]):
+                  print(f"  {str(k):<20} {v:>6}")
+
+              # Registros com status_doc='1'
+              cancelados_sb = [r for r in rows if r.get("status_doc") == "1"]
+              print(f"\n  Registros com status_doc='1' no Supabase: {len(cancelados_sb)}")
+              for r in cancelados_sb:
+                  print(f"    {r}")
           else:
-              print("\n  ⚠️  Nenhum registro com status_doc='1' encontrado!")
-              print("     Possíveis causas:")
-              print("     1. Campo status_doc não foi populado corretamente")
-              print("     2. Os cancelados têm outro valor no campo")
-
-          # 2. Distribuição de status_doc (todos os valores)
-          print("\n" + "="*65)
-          print("  DISTRIBUIÇÃO: todos os valores de status_doc")
-          print("="*65)
-          rows_all = rest_get("bi_faturamento?select=status_doc&limit=10000")
-          contagem = {}
-          for r in rows_all:
-              v = r.get('status_doc') or 'NULL/vazio'
-              contagem[v] = contagem.get(v, 0) + 1
-          print(f"\n  Total de registros em bi_faturamento: {len(rows_all)}")
-          print(f"\n  {'STATUS_DOC':<20} {'QTD':>6}")
-          print(f"  {'-'*20} {'-'*6}")
-          for k, v in sorted(contagem.items(), key=lambda x: -x[1]):
-              print(f"  {str(k):<20} {v:>6}")
-
-          # 3. Amostra de registros recentes para confirmar que status_doc está gravado
-          print("\n" + "="*65)
-          print("  AMOSTRA: 5 registros recentes (status_doc deve estar preenchido)")
-          print("="*65)
-          amostra = rest_get("bi_faturamento?select=numfatura,numsequencia,dataemissao,valoremissao,status_doc,liquidado&order=dataemissao.desc&limit=5")
-          print(f"\n  {'NUMFATURA':<15} {'SEQ':<5} {'EMISSÃO':<12} {'VALOR':>12}  {'STATUS':<8} {'LIQ'}")
-          print(f"  {'-'*15} {'-'*5} {'-'*12} {'-'*12}  {'-'*8} {'-'*3}")
-          for r in amostra:
-              print(f"  {str(r.get('numfatura','')):<15} {str(r.get('numsequencia','')):<5} "
-                    f"{str(r.get('dataemissao','')):<12} "
-                    f"{r.get('valoremissao',0):>12,.2f}  "
-                    f"{str(r.get('status_doc') or '(null)'):<8} "
-                    f"{r.get('liquidado','')}")
+              print(f"  Erro: {resp.text[:300]}")
+              print("\n  ⚠️  BI_SYNC_TOKEN não tem permissão de leitura no PostgREST.")
+              print("     Isso é esperado se o token só autentica na Edge Function.")
+              print("     Verifique os cancelados acima na seção FONTE BI —")
+              print("     se o backfill rodou sem erros, os dados estão lá.")
 
           EOF
