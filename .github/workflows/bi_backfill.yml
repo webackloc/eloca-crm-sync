@@ -152,6 +152,8 @@ jobs:
           print("\n" + "="*65)
           print("  BACKFILL: bi_faturamento (docrec completo)")
           print("="*65)
+          # Nota: PK composta (numfatura, numsequencia) — deduplica antes de enviar
+          # para evitar "ON CONFLICT DO UPDATE command cannot affect row a second time"
           cur.execute("""
               SELECT
                   CONVERT(VARCHAR(30), d.numfatura)          AS numfatura,
