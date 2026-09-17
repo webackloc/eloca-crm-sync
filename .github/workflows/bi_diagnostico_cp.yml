@@ -229,25 +229,32 @@ jobs:
           print(f"\n  Sem datavencto: {r['qtd']:,} títulos  R$ {r['valor']:>14,.2f}")
           print(f"    Pagos:   {r['qtd_pago']:,}   Em aberto: {r['qtd_aberto']:,}")
 
-          # ── 8. CRUZAMENTO: vencidos × dbaicp (usando EXISTS — sem inflação de JOIN)
+          # ── 8. CRUZAMENTO: vencidos × dbaicp (CTE para evitar erro SQL Server)
           print("\n" + "="*70)
-          print("  CRUZAMENTO CORRETO: vencidos × dbaicp (EXISTS, sem duplicação)")
+          print("  CRUZAMENTO CORRETO: vencidos × dbaicp")
           print("="*70)
 
           cur.execute("""
+              WITH tem_baixa AS (
+                  SELECT DISTINCT numfatura FROM dbaicp
+              ),
+              vencidos AS (
+                  SELECT
+                      dp.recnum,
+                      ISNULL(dp.valoremissao, 0) AS valor,
+                      CASE WHEN tb.numfatura IS NOT NULL THEN 1 ELSE 0 END AS has_baixa
+                  FROM docpag dp
+                  LEFT JOIN tem_baixa tb ON tb.numfatura = dp.numfatura
+                  WHERE (dp.numbordero = 0 OR dp.numbordero IS NULL)
+                    AND dp.datavencto < GETDATE()
+              )
               SELECT
-                  COUNT(*)                                                       AS total_vencidos,
-                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN 1 ELSE 0 END)                                   AS com_baixa,
-                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN 1 ELSE 0 END)                                   AS sem_baixa,
-                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)          AS valor_com_baixa,
-                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)          AS valor_sem_baixa
-              FROM docpag dp
-              WHERE (dp.numbordero = 0 OR dp.numbordero IS NULL)
-                AND dp.datavencto < GETDATE()
+                  COUNT(*)                              AS total_vencidos,
+                  SUM(has_baixa)                        AS com_baixa,
+                  SUM(1 - has_baixa)                    AS sem_baixa,
+                  SUM(has_baixa * valor)                AS valor_com_baixa,
+                  SUM((1 - has_baixa) * valor)          AS valor_sem_baixa
+              FROM vencidos
           """)
           r = cur.fetchone()
           print(f"\n  Títulos vencidos sem borderô (numbordero=0): {r['total_vencidos']:,}")
@@ -255,77 +262,86 @@ jobs:
           print(f"  → SEM baixa em dbaicp (real em aberto):  {r['sem_baixa']:,}  R$ {r['valor_sem_baixa']:>14,.2f}")
           print(f"\n  ⚠️  Os {r['com_baixa']:,} COM baixa foram pagos no caixa mas o ERP")
           print(f"     não atualizou o numbordero — NÃO são dívidas reais.")
-          print(f"     Os {r['sem_baixa']:,} SEM baixa precisam de análise: podem ser")
-          print(f"     dívidas reais ou títulos antigos sem conciliação.")
+          print(f"     Os {r['sem_baixa']:,} SEM baixa precisam de análise.")
 
-          # ── 9. RESUMO REAL (EXISTS — valores corretos) ──────────────────────
+          # ── 9. RESUMO REAL (CTE — valores corretos) ──────────────────────
           print("\n" + "="*70)
-          print("  RESUMO REAL (EXISTS) — valores corretos sem duplicação")
+          print("  RESUMO REAL — total geral usando dbaicp como fonte de pagamento")
           print("="*70)
 
           cur.execute("""
+              WITH tem_baixa AS (
+                  SELECT DISTINCT numfatura FROM dbaicp
+              ),
+              base AS (
+                  SELECT
+                      ISNULL(dp.valoremissao, 0)                              AS valor,
+                      CASE WHEN tb.numfatura IS NOT NULL THEN 1 ELSE 0 END    AS has_baixa
+                  FROM docpag dp
+                  LEFT JOIN tem_baixa tb ON tb.numfatura = dp.numfatura
+              )
               SELECT
-                  COUNT(*)                                                    AS total_titulos,
-                  ISNULL(SUM(ISNULL(dp.valoremissao, 0)), 0)                 AS valor_total,
-                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN 1 ELSE 0 END)                                AS qtd_com_baixa,
-                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)       AS valor_com_baixa,
-                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN 1 ELSE 0 END)                                AS qtd_sem_baixa,
-                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)       AS valor_sem_baixa
-              FROM docpag dp
+                  COUNT(*)                    AS total_titulos,
+                  SUM(valor)                  AS valor_total,
+                  SUM(has_baixa)              AS qtd_com_baixa,
+                  SUM(has_baixa * valor)      AS valor_com_baixa,
+                  SUM(1 - has_baixa)          AS qtd_sem_baixa,
+                  SUM((1-has_baixa) * valor)  AS valor_sem_baixa
+              FROM base
           """)
           r = cur.fetchone()
           print(f"\n  TOTAL: {r['total_titulos']:,} títulos  R$ {r['valor_total']:>14,.2f}")
           print(f"  Com baixa em dbaicp (pagos):  {r['qtd_com_baixa']:,}  R$ {r['valor_com_baixa']:>14,.2f}")
           print(f"  Sem baixa (real em aberto):   {r['qtd_sem_baixa']:,}  R$ {r['valor_sem_baixa']:>14,.2f}")
 
-          # Próximos 90 dias usando EXISTS
+          # Próximos 90 dias
           cur.execute("""
+              WITH tem_baixa AS (
+                  SELECT DISTINCT numfatura FROM dbaicp
+              ),
+              base90 AS (
+                  SELECT
+                      ISNULL(dp.valoremissao, 0)                              AS valor,
+                      CASE WHEN tb.numfatura IS NOT NULL THEN 1 ELSE 0 END    AS has_baixa
+                  FROM docpag dp
+                  LEFT JOIN tem_baixa tb ON tb.numfatura = dp.numfatura
+                  WHERE dp.datavencto >= GETDATE()
+                    AND dp.datavencto <= DATEADD(day, 90, GETDATE())
+              )
               SELECT
-                  COUNT(*)                                                    AS total,
-                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN 1 ELSE 0 END)                                AS qtd_pago,
-                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN 1 ELSE 0 END)                                AS qtd_aberto,
-                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)       AS valor_pago,
-                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
-                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)       AS valor_aberto
-              FROM docpag dp
-              WHERE dp.datavencto >= GETDATE()
-                AND dp.datavencto <= DATEADD(day, 90, GETDATE())
+                  COUNT(*)                    AS total,
+                  SUM(has_baixa)              AS qtd_pago,
+                  SUM(1 - has_baixa)          AS qtd_aberto,
+                  SUM(has_baixa * valor)      AS valor_pago,
+                  SUM((1-has_baixa) * valor)  AS valor_aberto
+              FROM base90
           """)
           r = cur.fetchone()
-          print(f"\n  PRÓXIMOS 90 DIAS (fonte: dbaicp como verdade):")
+          print(f"\n  PRÓXIMOS 90 DIAS (dbaicp como fonte de verdade):")
           print(f"    Total:              {r['total']:,} títulos")
           print(f"    Com baixa (pagos):  {r['qtd_pago']:,}  R$ {r['valor_pago']:>14,.2f}")
           print(f"    Sem baixa (aberto): {r['qtd_aberto']:,}  R$ {r['valor_aberto']:>14,.2f}")
 
-          # ── 10. 488 SEM BAIXA — quem são? ───────────────────────────────────
+          # ── 10. SEM BAIXA — quem são? ────────────────────────────────────
           print("\n" + "="*70)
           print("  DETALHE: títulos vencidos SEM baixa alguma em dbaicp")
-          print("  (candidatos a dívidas reais ou títulos sem conciliação)")
+          print("  (top 30 por valor — candidatos a dívidas reais)")
           print("="*70)
 
           cur.execute("""
               SELECT TOP 30
-                  CONVERT(VARCHAR(10), dp.datavencto, 120)              AS datavencto,
-                  ISNULL(CONVERT(VARCHAR(200), dp.fornecedor), '?')     AS fornecedor,
-                  ISNULL(CONVERT(VARCHAR(100), dp.tipodespesa), '')     AS tipodespesa,
-                  ISNULL(dp.valoremissao, 0)                            AS valor,
-                  CONVERT(VARCHAR(10), dp.dataemissao, 120)             AS dataemissao
+                  CONVERT(VARCHAR(10), dp.datavencto, 120)          AS datavencto,
+                  ISNULL(CONVERT(VARCHAR(200), dp.fornecedor), '?') AS fornecedor,
+                  ISNULL(CONVERT(VARCHAR(100), dp.tipodespesa), '') AS tipodespesa,
+                  ISNULL(dp.valoremissao, 0)                        AS valor
               FROM docpag dp
               WHERE (dp.numbordero = 0 OR dp.numbordero IS NULL)
                 AND dp.datavencto < GETDATE()
-                AND NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                AND dp.numfatura NOT IN (SELECT DISTINCT numfatura FROM dbaicp)
               ORDER BY dp.valoremissao DESC
           """)
           rows = cur.fetchall()
-          print(f"\n  Top 30 por valor (títulos vencidos e sem qualquer baixa):")
-          print(f"  {'VENCTO':<12} {'FORNECEDOR':<38} {'TIPO':<22} {'VALOR':>12}")
+          print(f"\n  {'VENCTO':<12} {'FORNECEDOR':<38} {'TIPO':<22} {'VALOR':>12}")
           print(f"  {'-'*12} {'-'*38} {'-'*22} {'-'*12}")
           for r in rows:
               print(f"  {r['datavencto']:<12} {str(r['fornecedor'])[:38]:<38} "
