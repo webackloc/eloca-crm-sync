@@ -229,71 +229,107 @@ jobs:
           print(f"\n  Sem datavencto: {r['qtd']:,} títulos  R$ {r['valor']:>14,.2f}")
           print(f"    Pagos:   {r['qtd_pago']:,}   Em aberto: {r['qtd_aberto']:,}")
 
-          # ── 8. CRUZAMENTO: vencidos × dbaicp (foram pagos mas numbordero=0?) ─
+          # ── 8. CRUZAMENTO: vencidos × dbaicp (usando EXISTS — sem inflação de JOIN)
           print("\n" + "="*70)
-          print("  CRUZAMENTO: vencidos sem numbordero × pagamentos em dbaicp")
-          print("  (identifica títulos marcados como 'aberto' mas já pagos na baixa)")
+          print("  CRUZAMENTO CORRETO: vencidos × dbaicp (EXISTS, sem duplicação)")
           print("="*70)
 
           cur.execute("""
               SELECT
-                  COUNT(DISTINCT dp.recnum)               AS titulos_vencidos_sem_bordero,
-                  COUNT(DISTINCT b.numfatura)             AS com_baixa_em_dbaicp,
-                  ISNULL(SUM(CASE WHEN b.numfatura IS NOT NULL
-                       THEN ISNULL(dp.valoremissao, 0) ELSE 0 END), 0) AS valor_com_baixa,
-                  ISNULL(SUM(CASE WHEN b.numfatura IS NULL
-                       THEN ISNULL(dp.valoremissao, 0) ELSE 0 END), 0) AS valor_sem_baixa
+                  COUNT(*)                                                       AS total_vencidos,
+                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN 1 ELSE 0 END)                                   AS com_baixa,
+                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN 1 ELSE 0 END)                                   AS sem_baixa,
+                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)          AS valor_com_baixa,
+                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)          AS valor_sem_baixa
               FROM docpag dp
-              LEFT JOIN dbaicp b ON b.numfatura = dp.numfatura
               WHERE (dp.numbordero = 0 OR dp.numbordero IS NULL)
                 AND dp.datavencto < GETDATE()
           """)
           r = cur.fetchone()
-          print(f"\n  Títulos vencidos sem borderô:       {r['titulos_vencidos_sem_bordero']:,}")
-          print(f"  → COM registro de baixa (dbaicp):   {r['com_baixa_em_dbaicp']:,}  R$ {r['valor_com_baixa']:>14,.2f}")
-          print(f"  → SEM registro de baixa (dbaicp):   {r['titulos_vencidos_sem_bordero'] - r['com_baixa_em_dbaicp']:,}  R$ {r['valor_sem_baixa']:>14,.2f}")
-          print(f"\n  ⚠️  Títulos COM baixa mas sem numbordero = pagos no caixa mas")
-          print(f"     não conciliados no ERP. O portal deve usar dbaicp como")
-          print(f"     fonte de verdade para pagamentos, não numbordero.")
+          print(f"\n  Títulos vencidos sem borderô (numbordero=0): {r['total_vencidos']:,}")
+          print(f"  → COM baixa em dbaicp (pagos no caixa):  {r['com_baixa']:,}  R$ {r['valor_com_baixa']:>14,.2f}")
+          print(f"  → SEM baixa em dbaicp (real em aberto):  {r['sem_baixa']:,}  R$ {r['valor_sem_baixa']:>14,.2f}")
+          print(f"\n  ⚠️  Os {r['com_baixa']:,} COM baixa foram pagos no caixa mas o ERP")
+          print(f"     não atualizou o numbordero — NÃO são dívidas reais.")
+          print(f"     Os {r['sem_baixa']:,} SEM baixa precisam de análise: podem ser")
+          print(f"     dívidas reais ou títulos antigos sem conciliação.")
 
-          # ── 9. RESUMO DO ESTADO REAL (usando dbaicp como fonte) ─────────────
+          # ── 9. RESUMO REAL (EXISTS — valores corretos) ──────────────────────
           print("\n" + "="*70)
-          print("  RESUMO REAL — usando dbaicp como fonte de pagamento")
-          print("  (mais confiável que numbordero)")
+          print("  RESUMO REAL (EXISTS) — valores corretos sem duplicação")
           print("="*70)
 
           cur.execute("""
               SELECT
-                  COUNT(DISTINCT dp.recnum)  AS total_titulos,
-                  ISNULL(SUM(ISNULL(dp.valoremissao, 0)), 0) AS valor_total,
-                  COUNT(DISTINCT CASE WHEN b.numfatura IS NOT NULL THEN dp.recnum END) AS qtd_com_baixa,
-                  ISNULL(SUM(CASE WHEN b.numfatura IS NOT NULL THEN ISNULL(dp.valoremissao,0) ELSE 0 END),0) AS valor_com_baixa,
-                  COUNT(DISTINCT CASE WHEN b.numfatura IS NULL THEN dp.recnum END) AS qtd_sem_baixa,
-                  ISNULL(SUM(CASE WHEN b.numfatura IS NULL THEN ISNULL(dp.valoremissao,0) ELSE 0 END),0) AS valor_sem_baixa
+                  COUNT(*)                                                    AS total_titulos,
+                  ISNULL(SUM(ISNULL(dp.valoremissao, 0)), 0)                 AS valor_total,
+                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN 1 ELSE 0 END)                                AS qtd_com_baixa,
+                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)       AS valor_com_baixa,
+                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN 1 ELSE 0 END)                                AS qtd_sem_baixa,
+                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)       AS valor_sem_baixa
               FROM docpag dp
-              LEFT JOIN dbaicp b ON b.numfatura = dp.numfatura
           """)
           r = cur.fetchone()
           print(f"\n  TOTAL: {r['total_titulos']:,} títulos  R$ {r['valor_total']:>14,.2f}")
-          print(f"  Pagos (tem baixa em dbaicp):  {r['qtd_com_baixa']:,}  R$ {r['valor_com_baixa']:>14,.2f}")
+          print(f"  Com baixa em dbaicp (pagos):  {r['qtd_com_baixa']:,}  R$ {r['valor_com_baixa']:>14,.2f}")
           print(f"  Sem baixa (real em aberto):   {r['qtd_sem_baixa']:,}  R$ {r['valor_sem_baixa']:>14,.2f}")
 
-          # Próximos 90 dias usando dbaicp
+          # Próximos 90 dias usando EXISTS
           cur.execute("""
               SELECT
-                  COUNT(DISTINCT dp.recnum)  AS total,
-                  ISNULL(SUM(CASE WHEN b.numfatura IS NOT NULL THEN ISNULL(dp.valoremissao,0) ELSE 0 END),0) AS valor_pago,
-                  ISNULL(SUM(CASE WHEN b.numfatura IS NULL THEN ISNULL(dp.valoremissao,0) ELSE 0 END),0) AS valor_aberto
+                  COUNT(*)                                                    AS total,
+                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN 1 ELSE 0 END)                                AS qtd_pago,
+                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN 1 ELSE 0 END)                                AS qtd_aberto,
+                  SUM(CASE WHEN EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)       AS valor_pago,
+                  SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+                           THEN ISNULL(dp.valoremissao, 0) ELSE 0 END)       AS valor_aberto
               FROM docpag dp
-              LEFT JOIN dbaicp b ON b.numfatura = dp.numfatura
               WHERE dp.datavencto >= GETDATE()
                 AND dp.datavencto <= DATEADD(day, 90, GETDATE())
           """)
           r = cur.fetchone()
-          print(f"\n  PRÓXIMOS 90 DIAS (fonte: dbaicp):")
-          print(f"    Total:       {r['total']:,} títulos")
-          print(f"    Já pagos:    R$ {r['valor_pago']:>14,.2f}")
-          print(f"    Em aberto:   R$ {r['valor_aberto']:>14,.2f}")
+          print(f"\n  PRÓXIMOS 90 DIAS (fonte: dbaicp como verdade):")
+          print(f"    Total:              {r['total']:,} títulos")
+          print(f"    Com baixa (pagos):  {r['qtd_pago']:,}  R$ {r['valor_pago']:>14,.2f}")
+          print(f"    Sem baixa (aberto): {r['qtd_aberto']:,}  R$ {r['valor_aberto']:>14,.2f}")
+
+          # ── 10. 488 SEM BAIXA — quem são? ───────────────────────────────────
+          print("\n" + "="*70)
+          print("  DETALHE: títulos vencidos SEM baixa alguma em dbaicp")
+          print("  (candidatos a dívidas reais ou títulos sem conciliação)")
+          print("="*70)
+
+          cur.execute("""
+              SELECT TOP 30
+                  CONVERT(VARCHAR(10), dp.datavencto, 120)              AS datavencto,
+                  ISNULL(CONVERT(VARCHAR(200), dp.fornecedor), '?')     AS fornecedor,
+                  ISNULL(CONVERT(VARCHAR(100), dp.tipodespesa), '')     AS tipodespesa,
+                  ISNULL(dp.valoremissao, 0)                            AS valor,
+                  CONVERT(VARCHAR(10), dp.dataemissao, 120)             AS dataemissao
+              FROM docpag dp
+              WHERE (dp.numbordero = 0 OR dp.numbordero IS NULL)
+                AND dp.datavencto < GETDATE()
+                AND NOT EXISTS (SELECT 1 FROM dbaicp b WHERE b.numfatura = dp.numfatura)
+              ORDER BY dp.valoremissao DESC
+          """)
+          rows = cur.fetchall()
+          print(f"\n  Top 30 por valor (títulos vencidos e sem qualquer baixa):")
+          print(f"  {'VENCTO':<12} {'FORNECEDOR':<38} {'TIPO':<22} {'VALOR':>12}")
+          print(f"  {'-'*12} {'-'*38} {'-'*22} {'-'*12}")
+          for r in rows:
+              print(f"  {r['datavencto']:<12} {str(r['fornecedor'])[:38]:<38} "
+                    f"{str(r['tipodespesa'])[:22]:<22} R$ {r['valor']:>10,.2f}")
 
           conn.close()
           print("\n✅ Diagnóstico concluído.")
