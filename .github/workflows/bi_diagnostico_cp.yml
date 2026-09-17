@@ -1,0 +1,234 @@
+name: BI — Diagnóstico Contas a Pagar (próximos 90 dias)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar dependências
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends freetds-dev freetds-bin
+          pip install pymssql --break-system-packages
+
+      - name: Diagnóstico Contas a Pagar
+        env:
+          BI_HOST:     ${{ secrets.BI_HOST }}
+          BI_PORT:     ${{ secrets.BI_PORT }}
+          BI_DATABASE: ${{ secrets.BI_DATABASE }}
+          BI_USER:     ${{ secrets.BI_USER }}
+          BI_PASSWORD: ${{ secrets.BI_PASSWORD }}
+        run: |
+          python3 - <<'EOF'
+          import os, pymssql
+          from datetime import date
+
+          conn = pymssql.connect(
+              server=os.environ["BI_HOST"],
+              port=int(os.environ.get("BI_PORT", 1433)),
+              database=os.environ["BI_DATABASE"],
+              user=os.environ["BI_USER"],
+              password=os.environ["BI_PASSWORD"],
+              timeout=60, charset="UTF-8",
+          )
+          cur = conn.cursor(as_dict=True)
+          hoje = date.today().isoformat()
+
+          # ── 1. RESUMO GERAL ─────────────────────────────────────────────────
+          print("\n" + "="*70)
+          print(f"  CONTAS A PAGAR — DIAGNÓSTICO COMPLETO  (hoje: {hoje})")
+          print("="*70)
+
+          cur.execute("""
+              SELECT
+                  COUNT(*)                                         AS total_titulos,
+                  SUM(ISNULL(valoremissao, 0))                    AS valor_total,
+                  SUM(CASE WHEN numbordero > 0
+                           THEN ISNULL(valoremissao, 0) ELSE 0 END) AS valor_pago,
+                  SUM(CASE WHEN numbordero = 0 OR numbordero IS NULL
+                           THEN ISNULL(valoremissao, 0) ELSE 0 END) AS valor_aberto,
+                  COUNT(CASE WHEN numbordero > 0 THEN 1 END)      AS qtd_pago,
+                  COUNT(CASE WHEN numbordero = 0 OR numbordero IS NULL
+                             THEN 1 END)                           AS qtd_aberto
+              FROM docpag
+          """)
+          r = cur.fetchone()
+          print(f"\n  TOTAL GERAL NO BANCO:")
+          print(f"    Títulos: {r['total_titulos']:,}")
+          print(f"    Valor total emitido:  R$ {r['valor_total']:>14,.2f}")
+          print(f"    Valor pago:           R$ {r['valor_pago']:>14,.2f}  ({r['qtd_pago']:,} títulos)")
+          print(f"    Valor em aberto:      R$ {r['valor_aberto']:>14,.2f}  ({r['qtd_aberto']:,} títulos)")
+
+          # ── 2. PRÓXIMOS 90 DIAS — por vencimento (datavencto) ───────────────
+          print("\n" + "="*70)
+          print("  PRÓXIMOS 90 DIAS — usando datavencto")
+          print("="*70)
+
+          cur.execute("""
+              SELECT
+                  COUNT(*)                                         AS total_titulos,
+                  SUM(ISNULL(valoremissao, 0))                    AS valor_total,
+                  SUM(CASE WHEN numbordero > 0
+                           THEN ISNULL(valoremissao, 0) ELSE 0 END) AS valor_pago,
+                  SUM(CASE WHEN numbordero = 0 OR numbordero IS NULL
+                           THEN ISNULL(valoremissao, 0) ELSE 0 END) AS valor_aberto,
+                  COUNT(CASE WHEN numbordero > 0 THEN 1 END)      AS qtd_pago,
+                  COUNT(CASE WHEN numbordero = 0 OR numbordero IS NULL
+                             THEN 1 END)                           AS qtd_aberto
+              FROM docpag
+              WHERE datavencto >= GETDATE()
+                AND datavencto <= DATEADD(day, 90, GETDATE())
+          """)
+          r = cur.fetchone()
+          print(f"\n  Títulos com vencimento entre hoje e +90 dias:")
+          print(f"    Total:           {r['total_titulos']:,} títulos  R$ {r['valor_total']:>14,.2f}")
+          print(f"    Já pagos:        {r['qtd_pago']:,} títulos  R$ {r['valor_pago']:>14,.2f}")
+          print(f"    Ainda em aberto: {r['qtd_aberto']:,} títulos  R$ {r['valor_aberto']:>14,.2f}")
+
+          # ── 3. PRÓXIMOS 90 DIAS — por vencimento útil (datavenctoutil) ──────
+          print("\n" + "="*70)
+          print("  PRÓXIMOS 90 DIAS — usando datavenctoutil (dia útil)")
+          print("="*70)
+
+          cur.execute("""
+              SELECT
+                  COUNT(*)                                         AS total_titulos,
+                  SUM(ISNULL(valoremissao, 0))                    AS valor_total,
+                  SUM(CASE WHEN numbordero > 0
+                           THEN ISNULL(valoremissao, 0) ELSE 0 END) AS valor_pago,
+                  SUM(CASE WHEN numbordero = 0 OR numbordero IS NULL
+                           THEN ISNULL(valoremissao, 0) ELSE 0 END) AS valor_aberto,
+                  COUNT(CASE WHEN numbordero > 0 THEN 1 END)      AS qtd_pago,
+                  COUNT(CASE WHEN numbordero = 0 OR numbordero IS NULL
+                             THEN 1 END)                           AS qtd_aberto
+              FROM docpag
+              WHERE datavenctoutil >= GETDATE()
+                AND datavenctoutil <= DATEADD(day, 90, GETDATE())
+          """)
+          r = cur.fetchone()
+          print(f"\n  Títulos com vencimento útil entre hoje e +90 dias:")
+          print(f"    Total:           {r['total_titulos']:,} títulos  R$ {r['valor_total']:>14,.2f}")
+          print(f"    Já pagos:        {r['qtd_pago']:,} títulos  R$ {r['valor_pago']:>14,.2f}")
+          print(f"    Ainda em aberto: {r['qtd_aberto']:,} títulos  R$ {r['valor_aberto']:>14,.2f}")
+
+          # ── 4. ABERTO POR MÊS (próximos 90 dias) ────────────────────────────
+          print("\n" + "="*70)
+          print("  EM ABERTO — breakdown por mês de vencimento")
+          print("="*70)
+
+          cur.execute("""
+              SELECT
+                  FORMAT(datavencto, 'yyyy-MM')       AS mes_vencto,
+                  FORMAT(datavenctoutil, 'yyyy-MM')   AS mes_vencto_util,
+                  COUNT(*)                            AS qtd,
+                  SUM(ISNULL(valoremissao, 0))        AS valor
+              FROM docpag
+              WHERE (numbordero = 0 OR numbordero IS NULL)
+                AND datavencto >= GETDATE()
+                AND datavencto <= DATEADD(day, 90, GETDATE())
+              GROUP BY FORMAT(datavencto, 'yyyy-MM'), FORMAT(datavenctoutil, 'yyyy-MM')
+              ORDER BY mes_vencto
+          """)
+          rows = cur.fetchall()
+          print(f"\n  {'MÊS VENCTO':<12} {'MÊS ÚTIL':<12} {'QTD':>5}  {'VALOR':>14}")
+          print(f"  {'-'*12} {'-'*12} {'-'*5}  {'-'*14}")
+          total_aberto = 0
+          for r in rows:
+              print(f"  {r['mes_vencto']:<12} {str(r['mes_vencto_util'] or ''):<12} "
+                    f"{r['qtd']:>5}  R$ {r['valor']:>12,.2f}")
+              total_aberto += r['valor']
+          print(f"  {'':12} {'TOTAL':<12} {'':5}  R$ {total_aberto:>12,.2f}")
+
+          # ── 5. EM ABERTO POR FORNECEDOR (top 20) ────────────────────────────
+          print("\n" + "="*70)
+          print("  EM ABERTO — top 20 fornecedores (próximos 90 dias)")
+          print("="*70)
+
+          cur.execute("""
+              SELECT TOP 20
+                  ISNULL(CONVERT(VARCHAR(200), fornecedor), '(sem fornecedor)') AS fornecedor,
+                  ISNULL(CONVERT(VARCHAR(100), tipodespesa), '')                AS tipodespesa,
+                  COUNT(*)                                                       AS qtd,
+                  SUM(ISNULL(valoremissao, 0))                                  AS valor
+              FROM docpag
+              WHERE (numbordero = 0 OR numbordero IS NULL)
+                AND datavencto >= GETDATE()
+                AND datavencto <= DATEADD(day, 90, GETDATE())
+              GROUP BY fornecedor, tipodespesa
+              ORDER BY valor DESC
+          """)
+          rows = cur.fetchall()
+          print(f"\n  {'FORNECEDOR':<40} {'TIPO':<25} {'QTD':>4}  {'VALOR':>14}")
+          print(f"  {'-'*40} {'-'*25} {'-'*4}  {'-'*14}")
+          for r in rows:
+              print(f"  {str(r['fornecedor'])[:40]:<40} "
+                    f"{str(r['tipodespesa'])[:25]:<25} "
+                    f"{r['qtd']:>4}  R$ {r['valor']:>12,.2f}")
+
+          # ── 6. TÍTULOS VENCIDOS NÃO PAGOS (atrasados) ───────────────────────
+          print("\n" + "="*70)
+          print("  VENCIDOS E NÃO PAGOS (em atraso)")
+          print("="*70)
+
+          cur.execute("""
+              SELECT
+                  COUNT(*)                            AS qtd,
+                  SUM(ISNULL(valoremissao, 0))        AS valor,
+                  MIN(datavencto)                     AS mais_antigo,
+                  MAX(datavencto)                     AS mais_recente
+              FROM docpag
+              WHERE (numbordero = 0 OR numbordero IS NULL)
+                AND datavencto < GETDATE()
+          """)
+          r = cur.fetchone()
+          print(f"\n  Títulos vencidos e não pagos: {r['qtd']:,}")
+          print(f"  Valor total em atraso:         R$ {r['valor']:>14,.2f}")
+          print(f"  Vencimento mais antigo:        {r['mais_antigo']}")
+          print(f"  Vencimento mais recente:       {r['mais_recente']}")
+
+          # breakdown por mês dos vencidos
+          cur.execute("""
+              SELECT
+                  FORMAT(datavencto, 'yyyy-MM') AS mes,
+                  COUNT(*)                      AS qtd,
+                  SUM(ISNULL(valoremissao, 0))  AS valor
+              FROM docpag
+              WHERE (numbordero = 0 OR numbordero IS NULL)
+                AND datavencto < GETDATE()
+              GROUP BY FORMAT(datavencto, 'yyyy-MM')
+              ORDER BY mes DESC
+          """)
+          rows = cur.fetchall()
+          print(f"\n  {'MÊS':<10} {'QTD':>5}  {'VALOR':>14}")
+          print(f"  {'-'*10} {'-'*5}  {'-'*14}")
+          for r in rows:
+              print(f"  {r['mes']:<10} {r['qtd']:>5}  R$ {r['valor']:>12,.2f}")
+
+          # ── 7. TÍTULOS SEM VENCIMENTO ────────────────────────────────────────
+          print("\n" + "="*70)
+          print("  TÍTULOS SEM DATAVENCTO (podem estar distorcendo totais)")
+          print("="*70)
+
+          cur.execute("""
+              SELECT
+                  COUNT(*)                           AS qtd,
+                  SUM(ISNULL(valoremissao, 0))       AS valor,
+                  COUNT(CASE WHEN numbordero > 0 THEN 1 END) AS qtd_pago,
+                  COUNT(CASE WHEN numbordero = 0 OR numbordero IS NULL THEN 1 END) AS qtd_aberto
+              FROM docpag
+              WHERE datavencto IS NULL
+          """)
+          r = cur.fetchone()
+          print(f"\n  Sem datavencto: {r['qtd']:,} títulos  R$ {r['valor']:>14,.2f}")
+          print(f"    Pagos:   {r['qtd_pago']:,}   Em aberto: {r['qtd_aberto']:,}")
+
+          conn.close()
+          print("\n✅ Diagnóstico concluído.")
+          EOF
