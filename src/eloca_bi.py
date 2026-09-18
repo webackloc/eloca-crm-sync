@@ -352,6 +352,7 @@ def fetch_bi_contas_pagar(janela_dias: int = 120) -> list[dict]:
     sql = """
         SELECT
             CONVERT(VARCHAR(30), dp.numfatura)           AS numfatura,
+            ISNULL(CONVERT(VARCHAR(10), dp.numsequencia), '0') AS numsequencia,
             CONVERT(VARCHAR(30), dp.recnum)              AS recnum,
             NULLIF(LTRIM(RTRIM(
                 ISNULL(CONVERT(VARCHAR(20), dp.contrato), '')
@@ -369,7 +370,7 @@ def fetch_bi_contas_pagar(janela_dias: int = 120) -> list[dict]:
             ISNULL(CONVERT(VARCHAR(100), dp.centrocusto), '')   AS centrocusto
         FROM docpag dp
         WHERE dp.datavencto >= DATEADD(day, -%(janela_dias)s, GETDATE())
-        ORDER BY dp.recnum
+        ORDER BY dp.numfatura, dp.numsequencia
     """
     logger.info("[BI] Buscando docpag (últimos %d dias) ...", janela_dias)
     conn = _get_conn()
